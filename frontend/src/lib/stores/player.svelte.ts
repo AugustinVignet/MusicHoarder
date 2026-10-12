@@ -16,9 +16,9 @@ import {
 } from '$lib/audio-formats';
 import {
   canAutoResume,
-  readPlaybackSnapshot,
-  writePlaybackSnapshot,
-  type PlaybackSnapshot
+  createPlaybackSnapshotStore,
+  type PlaybackSnapshot,
+  type PlaybackSnapshotStore
 } from '$lib/player-snapshot';
 import { previousAction } from '$lib/player-seek';
 import { songsStore } from '$lib/stores/songs.svelte';
@@ -244,7 +244,6 @@ const TICK_WAIT_MS = TIME_WRITE_INTERVAL_MS - 10;
  * is not.
  */
 const POSITION_PERSIST_INTERVAL_MS = 5000;
-let lastPositionPersist = 0;
 
 /**
  * The position loop: commit `currentTime`, wait out most of the interval in a timer, then take
@@ -256,11 +255,16 @@ let lastPositionPersist = 0;
  */
 function startRaf() {
   if (rafHandle !== null || tickTimer !== null) return;
+  // Counted from the first frame of this run, so a track that has just started does not write at
+  // once: whatever started it has already asked for a write, a moment from now (`schedulePersist`).
+  let positionPersistedAt: number | null = null;
   const tick = (now: number) => {
     rafHandle = null;
     if (audioEl) currentTime = audioEl.currentTime;
-    if (now - lastPositionPersist >= POSITION_PERSIST_INTERVAL_MS) {
-      lastPositionPersist = now;
+    if (positionPersistedAt === null) {
+      positionPersistedAt = now;
+    } else if (now - positionPersistedAt >= POSITION_PERSIST_INTERVAL_MS) {
+      positionPersistedAt = now;
       persistPlayback();
     }
     tickTimer = setTimeout(() => {
@@ -1324,7 +1328,13 @@ function registerPanel(): () => void {
 // top-up, pause, volume, dismiss, stop) and a position writer — the rAF loop
 // every few seconds plus the unload hook for the exact second a reload hits.
 // Position is deliberately NOT tracked by the effect: `currentTime` commits at
-// ~10 Hz while playing and serialising the queue that often is pointless work.
+// ~10 Hz while playing, and nothing needs it stored that often.
+//
+// The queue is an entry of its own (see $lib/player-snapshot), written only
+// when the queue is a different array. It can be the whole library, and storing
+// that holds the main thread for a tenth of a second on a phone; everything
+// else is a small entry, which is all a position write, a pause or a volume
+// change costs.
 
 /** The account the snapshot is written for; null until the app layout opts in. */
 let persistUserId: string | null = null;
@@ -1339,6 +1349,13 @@ function playbackStorage(): Storage | null {
   }
 }
 
+let snapshots: PlaybackSnapshotStore | null = null;
+
+/** The snapshot's entries in this tab's storage, and the memory of which queue they hold. */
+function snapshotStore(): PlaybackSnapshotStore {
+  return (snapshots ??= createPlaybackSnapshotStore(playbackStorage()));
+}
+
 /**
  * Compose the snapshot from live state. Reads the reactive fields directly so
  * the persistence effect below tracks exactly the set it should; the position
@@ -1347,7 +1364,6 @@ function playbackStorage(): Storage | null {
 function composePlaybackSnapshot(): PlaybackSnapshot | null {
   if (!persistUserId || !currentSong || queueIndex < 0) return null;
   return {
-    v: 1,
     userId: persistUserId,
     queue,
     queueIndex,
@@ -1362,26 +1378,75 @@ function composePlaybackSnapshot(): PlaybackSnapshot | null {
 }
 
 /**
- * How long a changed snapshot waits before it is written. Serialising a long queue and handing it
- * to sessionStorage is synchronous, and the change that causes it is usually a tap on Play: the
- * write must not sit between that tap and `play()`. Changes inside the window coalesce.
+ * How long a changed snapshot waits before it is written. The change that causes it is usually a
+ * tap on Play, and the write must not sit between that tap and `play()`. Changes inside the window
+ * coalesce.
  */
 const PERSIST_DELAY_MS = 400;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
 function schedulePersist() {
   if (persistTimer) return;
-  persistTimer = setTimeout(persistPlayback, PERSIST_DELAY_MS);
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    persistPlayback();
+  }, PERSIST_DELAY_MS);
 }
 
-/** Write the snapshot now (or clear it when nothing is loaded). No-op until persistence is on. */
-function persistPlayback() {
+/** How long a changed queue waits for the main thread to be idle before it is written anyway. */
+const QUEUE_WRITE_IDLE_TIMEOUT_MS = 2000;
+/** How long it waits where the browser has no idle callback to offer (Safari). */
+const QUEUE_WRITE_FALLBACK_MS = 1000;
+/** Calls off the queue write that is waiting for its moment, when one is. */
+let cancelQueueWrite: (() => void) | null = null;
+
+/**
+ * Write a changed queue at the next idle moment. Serialising a long queue and handing it to
+ * sessionStorage is synchronous, about 100 ms on a phone for 10,000 songs, and a queue changes
+ * because of a tap: the write is kept clear of the tap, the load it starts and the scroll after it.
+ */
+function scheduleQueueWrite() {
+  if (cancelQueueWrite) return;
+  const write = () => {
+    cancelQueueWrite = null;
+    // Something changed again in the meantime: its own delay brings the write back here.
+    if (!persistTimer) persistPlayback(true);
+  };
+  if (typeof requestIdleCallback === 'function') {
+    const handle = requestIdleCallback(write, { timeout: QUEUE_WRITE_IDLE_TIMEOUT_MS });
+    cancelQueueWrite = () => cancelIdleCallback(handle);
+  } else {
+    const handle = setTimeout(write, QUEUE_WRITE_FALLBACK_MS);
+    cancelQueueWrite = () => clearTimeout(handle);
+  }
+}
+
+/**
+ * Write the snapshot (or clear it when nothing is loaded). No-op until persistence is on.
+ *
+ * While the queue is the one already stored, that is the small entry, written here and now. A
+ * queue that is not is written with it only when `queueToo` says so (the page is going away) or
+ * the page is hidden, where nobody is kept waiting and an idle moment may never be offered.
+ * Otherwise the queue waits for one (`scheduleQueueWrite`) and the small entry waits with it: the
+ * two are only ever stored together, so until then a reload finds the queue and the song it had
+ * before.
+ */
+function persistPlayback(queueToo = false) {
+  if (!persistUserId) return;
+  const snapshot = untrack(composePlaybackSnapshot);
+  const store = snapshotStore();
+  if (snapshot && !queueToo && !document.hidden && store.needsQueueWrite(snapshot.queue)) {
+    // Still inside the delay after a change: that delay comes back here, so leave it to it.
+    if (!persistTimer) scheduleQueueWrite();
+    return;
+  }
   if (persistTimer) {
     clearTimeout(persistTimer);
     persistTimer = null;
   }
-  if (!persistUserId) return;
-  writePlaybackSnapshot(playbackStorage(), untrack(composePlaybackSnapshot));
+  cancelQueueWrite?.();
+  cancelQueueWrite = null;
+  store.write(snapshot);
 }
 
 function startPersistence() {
@@ -1396,10 +1461,11 @@ function startPersistence() {
   });
 
   // `pagehide` is the reload/close moment; `visibilitychange` covers mobile
-  // browsers that discard a background tab without ever firing it.
-  window.addEventListener('pagehide', persistPlayback);
+  // browsers that discard a background tab without ever firing it. Either may
+  // be the last script this document runs, so a queue still waiting is written.
+  window.addEventListener('pagehide', () => persistPlayback(true));
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') persistPlayback();
+    if (document.visibilityState === 'hidden') persistPlayback(true);
   });
 }
 
@@ -1410,11 +1476,11 @@ function startPersistence() {
  * the share page, say) is never replaced by a stored one.
  */
 function restorePlayback(userId: string) {
-  const storage = playbackStorage();
-  const snapshot = readPlaybackSnapshot(storage);
+  const store = snapshotStore();
+  const snapshot = store.read();
   if (!snapshot) return;
   if (snapshot.userId !== userId) {
-    writePlaybackSnapshot(storage, null); // another account's queue — never inherit it
+    store.write(null); // another account's queue — never inherit it
     return;
   }
   if (untrack(() => currentSong) !== null) return;
