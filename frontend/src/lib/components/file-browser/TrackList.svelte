@@ -667,7 +667,12 @@
     border-radius: 1px;
     background: currentColor;
   }
+  /* While it animates, a bar is full height and drawn shorter by a transform from its foot, so
+     the animation runs on the compositor. Animating `height` laid the document out and painted
+     it on every frame, for as long as a song played with its row on screen. */
   .mh-eq.is-playing > :global(i) {
+    height: 100%;
+    transform-origin: bottom;
     animation: mh-eq 0.9s ease-in-out infinite;
   }
   .mh-eq > :global(i:nth-child(1)) {
@@ -682,15 +687,16 @@
   @keyframes mh-eq {
     0%,
     100% {
-      height: 30%;
+      transform: scaleY(0.3);
     }
     50% {
-      height: 100%;
+      transform: scaleY(1);
     }
   }
   /* Belt-and-braces alongside the global reduced-motion clamp: a static three-bar pose. */
   @media (prefers-reduced-motion: reduce) {
     .mh-eq.is-playing > :global(i) {
+      height: 35%;
       animation: none;
     }
   }

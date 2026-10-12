@@ -221,16 +221,21 @@ let pendingLoad: { gen: number; songId: number } | null = null;
  */
 let listenOwed: number | null = null;
 let rafHandle: number | null = null;
-let lastTimeWrite = 0;
+/** The wait between one position commit and the frame that makes the next (see `startRaf`). */
+let tickTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * Minimum gap between `currentTime` state writes while playing. The RAF loop
- * still runs every frame, but committing the reactive value at ~10 Hz instead
- * of ~60 Hz keeps the progress UI smooth while avoiding a per-frame re-render
- * storm (the MiniPlayer slider forces a full-document reflow on each write, so
- * at 60 Hz it saturates the main thread and starves audio playback).
+ * How often `currentTime` is committed while playing: about 10 Hz. Every commit is a render (the
+ * scrubber, the mini player's progress, the synced lyric line), so this is also how many frames a
+ * second a playing song asks of the main thread. Nothing needs the position finer than that from
+ * here: the Media Session, a seek and a report to the session read it off the element.
  */
 const TIME_WRITE_INTERVAL_MS = 100;
+/**
+ * How much of that interval is spent in a timer. The frame asked for when it fires supplies the
+ * rest (up to 16 ms on a 60 Hz screen), which lands the next commit on the interval.
+ */
+const TICK_WAIT_MS = TIME_WRITE_INTERVAL_MS - 10;
 
 /**
  * How often the playing position is written to the reload snapshot. The unload hook writes
@@ -241,24 +246,36 @@ const TIME_WRITE_INTERVAL_MS = 100;
 const POSITION_PERSIST_INTERVAL_MS = 5000;
 let lastPositionPersist = 0;
 
+/**
+ * The position loop: commit `currentTime`, wait out most of the interval in a timer, then take
+ * one animation frame for the next commit. It used to ask for a frame on every frame and commit
+ * on one in six, and a frame that is asked for is a frame the browser runs its whole rendering
+ * pipeline for: 60 times a second for as long as a song played, most of them to draw nothing new.
+ * The frame stays at the end of the chain so a commit lands where a frame starts, and so the loop
+ * still parks while the page is hidden (frames do not fire there), exactly as it did.
+ */
 function startRaf() {
-  if (rafHandle !== null) return;
-  lastTimeWrite = 0;
+  if (rafHandle !== null || tickTimer !== null) return;
   const tick = (now: number) => {
-    if (audioEl && now - lastTimeWrite >= TIME_WRITE_INTERVAL_MS) {
-      lastTimeWrite = now;
-      currentTime = audioEl.currentTime;
-    }
+    rafHandle = null;
+    if (audioEl) currentTime = audioEl.currentTime;
     if (now - lastPositionPersist >= POSITION_PERSIST_INTERVAL_MS) {
       lastPositionPersist = now;
       persistPlayback();
     }
-    rafHandle = requestAnimationFrame(tick);
+    tickTimer = setTimeout(() => {
+      tickTimer = null;
+      rafHandle = requestAnimationFrame(tick);
+    }, TICK_WAIT_MS);
   };
   rafHandle = requestAnimationFrame(tick);
 }
 
 function stopRaf() {
+  if (tickTimer !== null) {
+    clearTimeout(tickTimer);
+    tickTimer = null;
+  }
   if (rafHandle !== null) {
     cancelAnimationFrame(rafHandle);
     rafHandle = null;

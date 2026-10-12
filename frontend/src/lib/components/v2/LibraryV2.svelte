@@ -1123,7 +1123,11 @@
     border-radius: 1px;
     background: currentColor;
   }
+  /* As in TrackList: while it animates, a bar is full height and scaled from its foot, so the
+     animation runs on the compositor instead of laying the page out on every frame. */
   .mh-eq.is-playing > i {
+    height: 100%;
+    transform-origin: bottom;
     animation: mh-eq 0.9s ease-in-out infinite;
   }
   .mh-eq > i:nth-child(1) {
@@ -1138,14 +1142,15 @@
   @keyframes mh-eq {
     0%,
     100% {
-      height: 30%;
+      transform: scaleY(0.3);
     }
     50% {
-      height: 100%;
+      transform: scaleY(1);
     }
   }
   @media (prefers-reduced-motion: reduce) {
     .mh-eq.is-playing > i {
+      height: 35%;
       animation: none;
     }
   }

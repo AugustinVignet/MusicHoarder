@@ -527,6 +527,104 @@ describe('recovering a stream', () => {
   });
 });
 
+describe('the position while a song plays', () => {
+  // What the browser's frames are to the store: a callback asked for runs once, when a frame is
+  // drawn, and not at all while the page is hidden.
+  let asked: Map<number, FrameRequestCallback>;
+  let framesAsked: number;
+  const drawFrame = (now: number) => {
+    const due = [...asked.values()];
+    asked.clear();
+    for (const callback of due) callback(now);
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    asked = new Map();
+    framesAsked = 0;
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      asked.set(++framesAsked, callback);
+      return framesAsked;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (handle: number) => asked.delete(handle));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  async function playing() {
+    const loaded = await loadPlayer();
+    await loaded.playerStore.playSong(song(1), [song(1), song(2)]);
+    loaded.audio.dispatchEvent(new Event('play'));
+    return loaded;
+  }
+
+  it('is committed about ten times a second, each from one frame — not a frame asked for on every frame', async () => {
+    const { playerStore, audio } = await playing();
+
+    // A second of a 60 Hz screen: a frame every 16.7 ms, drawn only if something asked for it.
+    let drawn = 0;
+    for (let frame = 0; frame < 60; frame++) {
+      audio.currentTime = frame / 60;
+      if (asked.size > 0) {
+        drawn += 1;
+        drawFrame(1000 + (frame * 1000) / 60);
+        expect(playerStore.currentTime).toBe(audio.currentTime);
+        // The commit asks for nothing: the next frame is only wanted once the interval is up.
+        expect(asked.size).toBe(0);
+      }
+      vi.advanceTimersByTime(1000 / 60);
+    }
+    expect(drawn).toBe(10);
+    expect(framesAsked).toBeLessThanOrEqual(11);
+  });
+
+  it('commits on every frame it takes, however little time the frame says has passed', async () => {
+    const { playerStore, audio } = await playing();
+    audio.currentTime = 5;
+    drawFrame(1000);
+    vi.advanceTimersByTime(90);
+
+    // A frame stamped a hair under the interval is still the one this commit waited for.
+    audio.currentTime = 5.1;
+    drawFrame(1099.9);
+    expect(playerStore.currentTime).toBe(5.1);
+  });
+
+  it('stops with the song, and a pause shows the exact second it stopped at', async () => {
+    const { playerStore, audio } = await playing();
+    drawFrame(1000);
+
+    audio.currentTime = 7.25;
+    audio.dispatchEvent(new Event('pause'));
+    expect(playerStore.currentTime).toBe(7.25);
+    vi.advanceTimersByTime(60_000);
+    expect(asked.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Paused while it was waiting on a frame: that frame is given back too.
+    audio.dispatchEvent(new Event('play'));
+    expect(asked.size).toBe(1);
+    audio.dispatchEvent(new Event('pause'));
+    expect(asked.size).toBe(0);
+  });
+
+  it('parks while the page is hidden, and carries on from the first frame after', async () => {
+    const { playerStore, audio } = await playing();
+    drawFrame(1000);
+    const before = framesAsked;
+
+    // Hidden: timers still fire, frames do not. One frame stays asked for, and nothing else runs.
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(framesAsked).toBe(before + 1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    audio.currentTime = 600;
+    drawFrame(601_000);
+    expect(playerStore.currentTime).toBe(600);
+    vi.advanceTimersByTime(90);
+    expect(asked.size).toBe(1);
+  });
+});
+
 describe('the station', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
