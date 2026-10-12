@@ -512,15 +512,15 @@
         <GroupedList.Row label="Size" value={formatFileSize(song.fileSizeBytes)} />
       </GroupedList.Section>
 
-      {#if song.fingerprint || song.musicBrainzId}
+      {#if detail?.fingerprint || song.musicBrainzId}
         <GroupedList.Section
           headingLevel={3}
           header="Identifiers"
           footer="Tap an identifier to copy it."
         >
-          {#if song.fingerprint}
+          {#if detail?.fingerprint}
             <!-- The chromaprint is long: the row shows its head and copies the whole thing. -->
-            {@render copyRow('Fingerprint', `${song.fingerprint.slice(0, 22)}…`, song.fingerprint)}
+            {@render copyRow('Fingerprint', `${detail.fingerprint.slice(0, 22)}…`, detail.fingerprint)}
           {/if}
           {#if song.musicBrainzId}
             {@render copyRow('MusicBrainz recording', song.musicBrainzId, song.musicBrainzId)}

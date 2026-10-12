@@ -45,6 +45,7 @@ public sealed class AlbumDuplicateDetector(
             .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && !s.IsDuplicate)
             .ExcludingDemoTenant()
             .Where(s => s.Album != null && s.Album != "")
+            .WithoutHeavyText(db)
             .ToListAsync(ct);
 
         var dismissed = await db.DedupDismissals

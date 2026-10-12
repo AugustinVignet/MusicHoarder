@@ -2,6 +2,8 @@
   import { playerStore } from '$lib/stores/player.svelte';
   import { songDetail } from '$lib/stores/song-detail.svelte';
   import { tapActionFor } from '$lib/track-list-view.svelte';
+  import { buttonVariants } from '$lib/components/ui/button';
+  import { cn } from '$lib/utils';
 
   /**
    * A row tap on a phone (the tap rule, mirrored by the Android client's `RowTap`): a song that is not the
@@ -18,6 +20,12 @@
     songDetail.open(songId, albumKey);
     if (!playerStore.isPlaying) playerStore.resume();
   }
+
+  /** The ⋯ trigger's classes, worked out once: what `Button variant="ghost" size="icon"` renders. */
+  const RESTING_TRIGGER = cn(
+    buttonVariants({ variant: 'ghost', size: 'icon' }),
+    'text-muted-foreground hover:text-foreground aria-expanded:text-foreground shrink-0 rounded-full pointer-coarse:size-11'
+  );
 </script>
 
 <script lang="ts">
@@ -50,7 +58,6 @@
   import { sendTo, sendToSong } from '$lib/stores/send-to.svelte';
   import { songsStore } from '$lib/stores/songs.svelte';
   import { artistOf, titleOf } from '$lib/track-list-view.svelte';
-  import { cn } from '$lib/utils';
 
   // The one action set for a song wherever it is listed — Tracks rows, album tracklists, the
   // Overview's favourites, an artist's songs — behind a visible ⋯ button and, on the row, a
@@ -104,6 +111,10 @@
   const artistHref = $derived(`/library?artist=${encodeURIComponent(artistOf(song))}`);
 
   let open = $state(false);
+  // A list builds one of these per row, and the menu machinery (the popper, its anchor, the focus
+  // and dismiss layers) was close to half of what a row cost to create, paid again for every row
+  // a scroll or a search brings in. Until it is first opened the menu is only its ⋯ button.
+  let mounted = $state(false);
   // Set while the menu is open from a touch-and-hold or a right-click: the content then anchors at
   // that point instead of at the ⋯ button, the way an iOS context menu grows from the finger.
   let anchor = $state<LongPressPoint | null>(null);
@@ -114,6 +125,7 @@
   });
 
   function setOpen(next: boolean) {
+    if (next) mounted = true;
     open = next;
     if (next) lookUpShare();
     else anchor = null;
@@ -179,6 +191,45 @@
   }
 </script>
 
+{#if !mounted}
+  <!-- A plain element with the trigger's look: the Button component and an icon component per row
+       were, after the menu itself, most of what was left of a row's cost. -->
+  <button
+    type="button"
+    data-slot="button"
+    aria-label="More for {title}"
+    aria-haspopup="menu"
+    aria-expanded="false"
+    class={cn(RESTING_TRIGGER, className)}
+    onclick={(e) => {
+      // The row behind this button plays or opens the song on click; the menu must not.
+      e.stopPropagation();
+      setOpen(true);
+    }}
+    onkeydown={(e) => {
+      // Rows handle Enter/Space themselves; keep the button's own key press from reaching them.
+      e.stopPropagation();
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setOpen(true);
+      }
+    }}
+  >
+    <!-- lucide's ellipsis, inline -->
+    <svg
+      class="size-5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /><circle cx="5" cy="12" r="1" />
+    </svg>
+  </button>
+{:else}
 <DropdownMenu.Root bind:open={() => open, setOpen}>
   <DropdownMenu.Trigger>
     {#snippet child({ props })}
@@ -274,6 +325,7 @@
     {/if}
   </DropdownMenu.Content>
 </DropdownMenu.Root>
+{/if}
 
 {#if playlistMounted}
   <AddToPlaylistSheet bind:open={playlistOpen} songIds={[song.id]} label={title} />

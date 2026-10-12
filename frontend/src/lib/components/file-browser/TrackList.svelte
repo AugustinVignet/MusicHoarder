@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
   import { ArrowDown, ArrowUp, Clock, Heart, ListMusic, Pause, Play } from '@lucide/svelte';
   import { toast } from 'svelte-sonner';
   import Cover from '$lib/components/file-browser/Cover.svelte';
@@ -222,7 +222,9 @@
     void view.chips.join(',');
     void view.sortKey;
     void view.sortDir;
-    if (scrollEl) scrollEl.scrollTop = 0;
+    // Only when it is not already at the top: assigning scrollTop makes the browser lay the page
+    // out on the spot, in the middle of the keystroke that changed the list.
+    if (scrollEl && untrack(() => scrollTop) !== 0) scrollEl.scrollTop = 0;
     scrollTop = 0;
   });
 

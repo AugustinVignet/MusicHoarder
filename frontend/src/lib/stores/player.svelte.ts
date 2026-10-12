@@ -62,8 +62,12 @@ let playbackRateState = $state(1);
  * tracks, a review list, etc.). `queueIndex` points at `currentSong` within it.
  * When a song ends we advance to `queue[queueIndex + 1]`; reaching the end no
  * longer stops playback — the radio appends more (see `topUpRadio`).
+ *
+ * `$state.raw` on purpose: the queue can be the whole library, it is only ever replaced (never
+ * edited in place), and a deep proxy over thousands of rows made every read and every snapshot
+ * of it cost main-thread time between a tap and the sound.
  */
-let queue = $state<PlayerSong[]>([]);
+let queue = $state.raw<PlayerSong[]>([]);
 let queueIndex = $state(-1);
 
 /**
@@ -1324,7 +1328,7 @@ function composePlaybackSnapshot(): PlaybackSnapshot | null {
   return {
     v: 1,
     userId: persistUserId,
-    queue: $state.snapshot(queue),
+    queue,
     queueIndex,
     position: audioEl?.currentTime ?? 0,
     wasPlaying: isPlaying,
@@ -1336,8 +1340,25 @@ function composePlaybackSnapshot(): PlaybackSnapshot | null {
   };
 }
 
+/**
+ * How long a changed snapshot waits before it is written. Serialising a long queue and handing it
+ * to sessionStorage is synchronous, and the change that causes it is usually a tap on Play: the
+ * write must not sit between that tap and `play()`. Changes inside the window coalesce.
+ */
+const PERSIST_DELAY_MS = 400;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function schedulePersist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(persistPlayback, PERSIST_DELAY_MS);
+}
+
 /** Write the snapshot now (or clear it when nothing is loaded). No-op until persistence is on. */
 function persistPlayback() {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
   if (!persistUserId) return;
   writePlaybackSnapshot(playbackStorage(), untrack(composePlaybackSnapshot));
 }
@@ -1348,8 +1369,8 @@ function startPersistence() {
 
   $effect.root(() => {
     $effect(() => {
-      const snapshot = composePlaybackSnapshot(); // tracked reads
-      untrack(() => writePlaybackSnapshot(playbackStorage(), snapshot));
+      composePlaybackSnapshot(); // tracked reads: this is what a later write depends on
+      untrack(schedulePersist);
     });
   });
 

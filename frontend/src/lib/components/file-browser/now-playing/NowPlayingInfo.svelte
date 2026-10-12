@@ -119,6 +119,9 @@
   let detailLoading = $state(false);
   let detailError = $state<string | null>(null);
   let loadedSongId = $state<number | null>(null);
+  // The song list only says a fingerprint exists; the string comes with the track's detail, and
+  // only while that detail is this song's.
+  const fingerprint = $derived(loadedSongId === song.id ? (enrichmentDetail?.fingerprint ?? null) : null);
 
   async function loadEnrichmentDetail(id: number) {
     detailLoading = true;
@@ -537,9 +540,9 @@
     // The chromaprint itself is long; the row shows its head and copies the whole thing.
     {
       label: 'Fingerprint',
-      value: song.fingerprint ? `${song.fingerprint.slice(0, 22)}…` : '—',
-      copy: Boolean(song.fingerprint),
-      full: song.fingerprint ?? undefined
+      value: fingerprint ? `${fingerprint.slice(0, 22)}…` : '—',
+      copy: Boolean(fingerprint),
+      full: fingerprint ?? undefined
     }
   ]);
   const fileRows = $derived<Row[]>([
@@ -666,7 +669,7 @@
         </GroupedList.Row>
         <div class="px-4 py-3">
           <div class="bg-muted flex h-16 items-end gap-[2px] rounded-lg p-1.5" aria-hidden="true">
-            {#each fingerprintBars(song.fingerprint) as h, i (i)}
+            {#each fingerprintBars(fingerprint) as h, i (i)}
               <div
                 class="from-primary to-primary/40 flex-1 rounded-[1px] bg-gradient-to-t"
                 style="height: {h}%; min-height: 2px;"
@@ -674,14 +677,14 @@
             {/each}
           </div>
         </div>
-        {#if song.fingerprint}
+        {#if fingerprint}
           <GroupedList.Row
-            onclick={() => copy('Fingerprint', song.fingerprint ?? '')}
+            onclick={() => copy('Fingerprint', fingerprint ?? '')}
             label="Fingerprint"
             aria-label="Copy fingerprint"
           >
             <span class="text-footnote text-muted-foreground line-clamp-3 font-mono break-all">
-              {fingerprintHash(song.fingerprint)}
+              {fingerprintHash(fingerprint)}
             </span>
             {#snippet trailing()}
               <Copy class="text-muted-foreground size-4" aria-hidden="true" />

@@ -26,14 +26,20 @@ import {
 import { isBuiltSong } from '$lib/album-sections';
 import { isTrackListSong } from '$lib/track-list-view.svelte';
 
-let songs = $state<ApiSong[]>([]);
+/**
+ * Every row the caller may see. `$state.raw`: the rows are plain objects and the array is replaced,
+ * never edited in place — a deep proxy over thousands of rows of seventy fields put a trap, and
+ * a signal per field read, between every filter, sort and render and the data. A change to one
+ * row goes through {@link patchSong}, which swaps that row and the array.
+ */
+let songs = $state.raw<ApiSong[]>([]);
 /**
  * The album cards the server grouped, still as it sent them. Kept apart from {@link albums} so a
  * heart tap or a play can re-join against the mutated song rows without another request.
  */
-let albumDtos = $state<AlbumSummaryDto[]>([]);
+let albumDtos = $state.raw<AlbumSummaryDto[]>([]);
 /** Cards for the song-detail panel: every song, per folder, unmerged. Loaded on first use. */
-let detailAlbumDtos = $state<AlbumSummaryDto[]>([]);
+let detailAlbumDtos = $state.raw<AlbumSummaryDto[]>([]);
 let detailAlbumsRequested = false;
 /**
  * Where the detail cards stand. 'loaded' sticks through a background refresh (and a failed one:
@@ -145,11 +151,16 @@ function scheduleSongRefresh(): void {
 
 function openStream(): void {
   if (liveCleanup) return;
-  lastBuilt = -1;
+  // lastBuilt is kept across a reopen: what was built while the stream was closed still shows up
+  // as a change, and a stream that reopens onto the same count refetches nothing.
   sawActive = false;
   liveCleanup = openProgressStream(
     (snap: ProgressSnapshot) => {
-      if (snap.built !== lastBuilt) {
+      if (lastBuilt === -1) {
+        // The first snapshot this document sees is where the count stands, not a change to it.
+        // Treating it as one refetched the whole library a few seconds after every page load.
+        lastBuilt = snap.built;
+      } else if (snap.built !== lastBuilt) {
         lastBuilt = snap.built;
         sawActive = true;
         scheduleSongRefresh();
@@ -205,25 +216,37 @@ function findSong(id: number): ApiSong | undefined {
 }
 
 /**
- * Toggle a song's liked state. Mutates the store row optimistically (rows are
- * deep `$state` proxies, so every view reacts) and reverts on API failure —
- * callers surface the thrown error (e.g. demo read-only) however they like.
+ * Change one row: a new object in a new array, so everything derived from the list sees it. The
+ * rows are not proxies, so assigning to a field of one would change nothing on screen.
+ */
+function patchSong(id: number, patch: Partial<ApiSong>): void {
+  const index = songs.findIndex((s) => s.id === id);
+  if (index < 0) return;
+  const next = songs.slice();
+  next[index] = { ...songs[index], ...patch };
+  songs = next;
+}
+
+/**
+ * Toggle a song's liked state. Updates the store row optimistically (see {@link patchSong}, so
+ * every view reacts) and reverts on API failure — callers surface the thrown error (e.g. demo
+ * read-only) however they like.
  */
 async function toggleLike(id: number): Promise<void> {
   const song = findSong(id);
   if (!song) return;
   const previous = song.likedAtUtc ?? null;
   const liking = !previous;
-  song.likedAtUtc = liking ? new Date().toISOString() : null;
+  patchSong(id, { likedAtUtc: liking ? new Date().toISOString() : null });
   try {
     const result = liking ? await likeSong(id) : await unlikeSong(id);
-    song.likedAtUtc = result.likedAtUtc;
+    patchSong(id, { likedAtUtc: result.likedAtUtc });
     // Liking an album-fill track promotes it to "yours", which can move the album's added-date and
     // so its place in "Recently added". That rule is the server's now, so ask it again rather than
     // keeping a second copy here — it is one small request, and only on a real like.
     if (song.acquisitionIntent === 'AlbumFill' || song.isAlbumFill) void refreshAlbums();
   } catch (err) {
-    song.likedAtUtc = previous;
+    patchSong(id, { likedAtUtc: previous });
     throw err;
   }
 }
@@ -242,8 +265,7 @@ async function refreshAlbums(): Promise<void> {
 function notePlayed(id: number): void {
   const song = findSong(id);
   if (!song) return;
-  song.playCount = (song.playCount ?? 0) + 1;
-  song.lastPlayedAtUtc = new Date().toISOString();
+  patchSong(id, { playCount: (song.playCount ?? 0) + 1, lastPlayedAtUtc: new Date().toISOString() });
 }
 
 /**
@@ -254,6 +276,7 @@ function notePlayed(id: number): void {
  */
 function reset(): void {
   songs = [];
+  lastBuilt = -1;
   albumDtos = [];
   detailAlbumDtos = [];
   detailAlbumsRequested = false;

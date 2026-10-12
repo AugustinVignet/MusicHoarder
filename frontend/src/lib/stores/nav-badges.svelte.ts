@@ -70,6 +70,20 @@ function songCount(status: string): number | null {
   return songs.filter((s) => mapEnrichmentStatus(s.enrichmentStatus) === status).length;
 }
 
+/**
+ * Resolves once the library's first load is out of the way (or after eight seconds regardless).
+ * The name counts each make the server walk every song; started alongside the song list they
+ * took the same CPU and held back the one request the page is waiting for, for a number in a
+ * sidebar.
+ */
+async function afterLibraryLoad(): Promise<void> {
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  // A page asks for the library a moment after the shell mounts; give it the chance to.
+  await wait(150);
+  const deadline = Date.now() + 8000;
+  while (songsStore.isLoading && Date.now() < deadline) await wait(100);
+}
+
 function load(kind: 'decisions' | 'names', force: boolean): Promise<void> {
   if (typeof window === 'undefined') return Promise.resolve();
   const running = inFlight[kind];
@@ -89,6 +103,7 @@ function load(kind: 'decisions' | 'names', force: boolean): Promise<void> {
           .catch(() => {})
       ]);
     } else {
+      if (!force) await afterLibraryLoad();
       await Promise.all([
         fetchArtistDuplicates()
           .then((r) => (fetched.artists = r.clusters.length + r.combinedCredits.length))
