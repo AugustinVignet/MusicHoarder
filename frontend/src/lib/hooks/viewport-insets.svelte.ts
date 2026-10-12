@@ -48,7 +48,7 @@ export function installBottomInsetTracker(): () => void {
  *
  * `display-mode` is the standard signal and matches what the manifest asked for (`standalone`;
  * `fullscreen` has no browser chrome either). `navigator.standalone` is the iOS-only flag that
- * predates the manifest and is still what older iOS versions set. The native iOS shell counts
+ * predates the manifest and is still what older iOS versions set. The native app shell counts
  * too: its web view has no browser chrome, no swipe-back and no status-bar tap either.
  */
 export function isInstalledApp(): boolean {

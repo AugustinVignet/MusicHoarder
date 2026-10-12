@@ -1,6 +1,6 @@
 /**
- * The native iOS shell (`ios/` at the repo root): the same pages, loaded from this server into a
- * Capacitor web view, with a native audio player behind the transport.
+ * The native shell (`mobile/` at the repo root, built for iOS and Android): the same pages, loaded
+ * from this server into a Capacitor web view, with a native audio player behind the transport.
  *
  * Capacitor injects `window.Capacitor` into every page the shell loads, so nothing is imported
  * here and a browser pays nothing for it. Only the two entry points the injected bridge always has
@@ -10,6 +10,7 @@
 
 interface CapacitorBridge {
   isNativePlatform?: () => boolean;
+  getPlatform?: () => string;
   PluginHeaders?: { name: string }[];
   nativePromise?: (plugin: string, method: string, options?: unknown) => Promise<unknown>;
   addListener?: (plugin: string, event: string, callback: (data: unknown) => void) => unknown;
@@ -24,6 +25,14 @@ function bridge(): CapacitorBridge | null {
 /** True when the page runs inside the native shell rather than a browser or a Home Screen app. */
 export function isNativeShell(): boolean {
   return bridge() !== null;
+}
+
+export type NativePlatform = 'ios' | 'android';
+
+/** Which system the shell runs on, or null outside it. */
+export function nativePlatform(): NativePlatform | null {
+  const platform = bridge()?.getPlatform?.();
+  return platform === 'ios' || platform === 'android' ? platform : null;
 }
 
 /** One native plugin, as the calls and events it takes. */

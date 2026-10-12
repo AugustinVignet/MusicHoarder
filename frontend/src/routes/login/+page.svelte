@@ -55,7 +55,7 @@
   let isPasskeyLogin = $state(false);
   let passkeySupported = $state(false);
   // An iOS Home Screen app has its own cookie jar and never receives links — an emailed sign-in
-  // link always opens in Safari — so inside it a passkey is the way in. The native shell does
+  // link always opens in Safari — so inside it a passkey is the way in. The native app shell does
   // receive them (the link's page hands the token over through `musichoarder://auth`), so there
   // email leads as it does in a browser.
   let inIosHomeScreenApp = $state(false);

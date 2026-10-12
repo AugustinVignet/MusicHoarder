@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlayerSong } from './player.svelte';
 
 /**
- * The player store inside the native iOS shell, where the device's own player stands in for the
+ * The player store inside the native app shell, where the device's own player stands in for the
  * audio element (`$lib/native/native-audio`). The device moves to the next track by itself when a
  * song ends, with the page asleep or not, so what these pin is the store catching up with it:
  * one track or several, counted and queued as if the page had been awake, and never loaded twice.
@@ -61,8 +61,11 @@ const device = {
   }
 };
 
+let platform: 'ios' | 'android' = 'ios';
+
 vi.mock('$lib/native/shell', () => ({
   isNativeShell: () => true,
+  nativePlatform: () => platform,
   nativePlugin: () => ({
     call: async (method: string, options: Record<string, unknown> = {}) => {
       device.calls.push({ method, options });
@@ -101,6 +104,7 @@ async function loadPlayer() {
 
 beforeEach(() => {
   vi.resetModules();
+  platform = 'ios';
   device.calls = [];
   device.listeners = new Map();
   fetchMock = vi.fn(async () => ({ ok: true }));
@@ -151,6 +155,14 @@ describe('loading a track on the device', () => {
     await playerStore.playSong(song(1, 'opus'));
     await settle();
     expect(device.last('loadTrack').url).toBe(`${url(1)}?format=wav`);
+  });
+
+  it('streams that format as it is on Android, whose player opens it', async () => {
+    platform = 'android';
+    const { playerStore } = await loadPlayer();
+    await playerStore.playSong(song(1, 'opus'));
+    await settle();
+    expect(device.last('loadTrack').url).toBe(url(1));
   });
 
   it('shows what the device reports', async () => {

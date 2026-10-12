@@ -1,13 +1,14 @@
-import { nativePlugin, type NativePlugin } from './shell';
+import { nativePlatform, nativePlugin, type NativePlatform, type NativePlugin } from './shell';
 
 /**
- * The native player of the iOS shell, wearing the part of an audio element the player store uses.
+ * The native player of the app shell, wearing the part of an audio element the player store uses.
  *
  * In a browser the store drives an `<audio>` element, and a song's end is the page's to handle:
  * load the next source, call `play()`. An iOS page in the background gets seconds for that, and
- * none once it is suspended (see "Background playback" in `player.svelte.ts`). In the shell the
- * store drives this instead, which forwards to an AVQueuePlayer
- * (`ios/plugin/ios/Sources/NativeAudioPlugin`). The store still decides what plays: it loads a
+ * none once it is suspended (see "Background playback" in `player.svelte.ts`); an Android web view
+ * has no foreground service to keep it alive at all. In the shell the store drives this instead,
+ * which forwards to the device's own queue player (`mobile/plugin`: an AVQueuePlayer on iOS,
+ * Media3 in a media session service on Android). The store still decides what plays: it loads a
  * track here and hands over the tracks that follow it. The difference is that the next track
  * starts on the device at the moment the current one ends, whether or not the page is running.
  *
@@ -18,7 +19,7 @@ import { nativePlugin, type NativePlugin } from './shell';
  * is already on, and that load is adopted instead of sent. Each step counts its listen, moves the
  * queue and reports to the account's session exactly as if the page had been awake for it.
  *
- * This file and the Swift plugin are one protocol and change together.
+ * This file and the two native plugins are one protocol and change together.
  */
 
 /** The audio element as the player store uses it; `HTMLAudioElement` fits as it is. */
@@ -73,8 +74,14 @@ const MEDIA_ERR_NETWORK = 2;
 const MEDIA_ERR_SRC_NOT_SUPPORTED = 4;
 const HAVE_ENOUGH_DATA = 4;
 
-/** Containers AVFoundation cannot open; the server decodes these (see `$lib/audio-formats`). */
-const UNPLAYABLE_TYPE = /ogg|opus|webm|x-ms-wma/i;
+/**
+ * What each system's player cannot open; the server decodes these (see `$lib/audio-formats`).
+ * AVFoundation has no Ogg or WebM; ExoPlayer plays every format the library holds but WMA.
+ */
+const UNPLAYABLE_TYPE: Record<NativePlatform, RegExp> = {
+  ios: /ogg|opus|webm|x-ms-wma/i,
+  android: /x-ms-wma/i
+};
 
 /** How far a reported position may sit from the one just asked for and still be that seek. */
 const SEEK_TOLERANCE_S = 3;
@@ -138,6 +145,7 @@ export class NativeAudio extends EventTarget implements PlayerAudio {
 
   constructor(
     private readonly plugin: NativePlugin,
+    private readonly platform: NativePlatform = 'ios',
     private readonly now: () => number = () => performance.now()
   ) {
     super();
@@ -219,7 +227,7 @@ export class NativeAudio extends EventTarget implements PlayerAudio {
   }
 
   canPlayType(type: string): string {
-    return UNPLAYABLE_TYPE.test(type) ? '' : 'probably';
+    return UNPLAYABLE_TYPE[this.platform].test(type) ? '' : 'probably';
   }
 
   setAttribute(): void {}
@@ -323,6 +331,14 @@ export class NativeAudio extends EventTarget implements PlayerAudio {
     this.commands = { next, previous };
     this.commandsDirty = true;
     this.scheduleFlush();
+  }
+
+  /**
+   * Whether there is a route sheet to open. Android's output switcher sits on the media
+   * notification instead, where the system puts it.
+   */
+  get hasRoutePicker(): boolean {
+    return this.platform === 'ios';
   }
 
   /** The system's AirPlay and Bluetooth route sheet. */
@@ -588,5 +604,5 @@ function absolute(url: string): string {
 /** The shell's player, or null in a browser: the store then uses an audio element as ever. */
 export function createNativeAudio(): NativeAudio | null {
   const plugin = nativePlugin('NativeAudio');
-  return plugin ? new NativeAudio(plugin) : null;
+  return plugin ? new NativeAudio(plugin, nativePlatform() ?? 'ios') : null;
 }

@@ -13,11 +13,10 @@ const config: CapacitorConfig = {
   appName: 'MusicHoarder',
   // What the app shows when it has no server to load, or cannot reach it (see www/index.html).
   webDir: 'www',
+  appendUserAgent: 'MusicHoarderApp',
   ios: {
-    path: 'xcode',
     // The pages pad for the status bar and the home indicator themselves (viewport-fit=cover).
-    contentInset: 'never',
-    appendUserAgent: 'MusicHoarderApp'
+    contentInset: 'never'
   },
   ...(serverUrl
     ? {

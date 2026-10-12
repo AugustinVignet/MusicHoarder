@@ -169,7 +169,7 @@ function remoteView(): PlayerRemote | null {
 
 let audioEl: PlayerAudio | null = null;
 /**
- * The same object as `audioEl` inside the native iOS shell, where the device's own player stands
+ * The same object as `audioEl` inside the native app shell, where the device's own player stands
  * in for the audio element (see `$lib/native/native-audio`); null in a browser.
  */
 let nativeEl: NativeAudio | null = null;
@@ -341,7 +341,7 @@ function refreshActionHandlers() {
   // previous/next belong on the lock screen, Control Center and Dynamic Island.
 }
 
-// ── The native iOS shell ───────────────────────────────────────────────────
+// ── The native app shell ───────────────────────────────────────────────────
 // There the device's player holds the loaded track and the ones that follow it, so a song's end
 // needs nothing from the page (see `$lib/native/native-audio`). The store's part is to keep the
 // device told what follows, and to take the lock screen's commands from it: the page's own Media
@@ -686,7 +686,7 @@ function ensureAudioEl(): PlayerAudio | null {
   if (native) {
     native.onRemote = nativeRemote;
     nativeEl = native;
-    airPlayAvailable = true; // the system's route sheet is always there to open
+    airPlayAvailable = native.hasRoutePicker; // iOS's route sheet is always there to open
   } else if (typeof window !== 'undefined' && 'WebKitPlaybackTargetAvailabilityEvent' in window) {
     el.setAttribute('x-webkit-airplay', 'allow');
     el.addEventListener('webkitplaybacktargetavailabilitychanged', (event) => {
