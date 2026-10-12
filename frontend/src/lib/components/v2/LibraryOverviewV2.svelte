@@ -11,7 +11,10 @@
   import {
     coverUrlForSong,
     isSpotifyLiked,
+    seededOrder,
+    sortAlbumsByLastPlayed,
     sortAlbumsByRecency,
+    sortSongsByRecentlyLiked,
     toPlayerSong,
     type AlbumSummary,
     type ApiSong,
@@ -57,17 +60,9 @@
 
   // ── per-visit random order that stays stable across live refetches ──────────
   // A real shuffle inside $derived would reorder the shelves every time the
-  // songs store silently refreshes; hashing item keys against a per-mount seed
-  // keeps the "random" sections random per visit but stable within it.
+  // songs store silently refreshes; seededOrder hashes item keys against this
+  // per-mount seed, keeping the "random" sections random per visit but stable within it.
   const seed = Math.floor(Math.random() * 0xffff_ffff).toString(36);
-  function seededOrder<T>(items: T[], keyOf: (item: T) => string): T[] {
-    const hash = (s: string): number => {
-      let h = 5381;
-      for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-      return h;
-    };
-    return [...items].sort((a, b) => hash(keyOf(a) + seed) - hash(keyOf(b) + seed));
-  }
 
   const SHELF_SIZE = 12;
   /** Rows per column in the Favourite tracks list. */
@@ -75,40 +70,26 @@
 
   // ── sections ────────────────────────────────────────────────────────────────
   const favoriteTracks = $derived(
-    builtSongs
-      .filter((s) => Boolean(s.likedAtUtc))
-      .sort((a, b) => Date.parse(b.likedAtUtc ?? '') - Date.parse(a.likedAtUtc ?? ''))
-      .slice(0, 10)
+    sortSongsByRecentlyLiked(builtSongs.filter((s) => Boolean(s.likedAtUtc))).slice(0, 10)
   );
 
   const recentAlbums = $derived(sortAlbumsByRecency(allAlbums).slice(0, SHELF_SIZE));
 
-  function albumLastPlayed(a: AlbumSummary): number {
-    let max = 0;
-    for (const s of a.songs) {
-      const at = songsStore.playStatsOf(s).lastPlayedAtUtc;
-      const t = at ? Date.parse(at) : 0;
-      if (t > max) max = t;
-    }
-    return max;
-  }
   function neverPlayed(a: AlbumSummary): boolean {
     return a.songs.every((s) => !songsStore.playStatsOf(s).playCount);
   }
-  // Each album's last play is worked out once, not once per comparison of the sort.
+  // Through the store's play stats, so a play counted since the last fetch moves its album up.
   const lastPlayedAlbums = $derived(
-    allAlbums
-      .map((album) => ({ album, at: albumLastPlayed(album) }))
-      .filter((played) => played.at > 0)
-      .sort((a, b) => b.at - a.at)
-      .slice(0, SHELF_SIZE)
-      .map((played) => played.album)
+    sortAlbumsByLastPlayed(allAlbums, (s) => songsStore.playStatsOf(s).lastPlayedAtUtc).slice(
+      0,
+      SHELF_SIZE
+    )
   );
 
   // Discover: albums you've never pressed play on — a random rummage through the
   // unlistened corners of the hoard.
   const discoverAlbums = $derived(
-    seededOrder(allAlbums.filter(neverPlayed), (a) => a.key).slice(0, SHELF_SIZE)
+    seededOrder(allAlbums.filter(neverPlayed), (a) => a.key, seed).slice(0, SHELF_SIZE)
   );
 
   // New to you: albums that album completion filled in and you haven't played yet. This is the
@@ -120,12 +101,15 @@
           a.songs.some((s) => s.acquisitionIntent === 'AlbumFill' && !s.likedAtUtc) &&
           neverPlayed(a)
       ),
-      (a) => a.key
+      (a) => a.key,
+      seed
     ).slice(0, SHELF_SIZE)
   );
 
-  const randomArtists = $derived(seededOrder(artistGroups, (g) => g.key).slice(0, SHELF_SIZE));
-  const randomAlbums = $derived(seededOrder(allAlbums, (a) => a.key).slice(0, SHELF_SIZE));
+  const randomArtists = $derived(
+    seededOrder(artistGroups, (g) => g.key, seed).slice(0, SHELF_SIZE)
+  );
+  const randomAlbums = $derived(seededOrder(allAlbums, (a) => a.key, seed).slice(0, SHELF_SIZE));
 
   // ── Library rows ────────────────────────────────────────────────────────────
   // The Listen pages the tab bar does not carry. An admin's and the demo's tab bar has one tab per

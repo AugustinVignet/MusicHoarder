@@ -827,9 +827,19 @@ export function isAlbumSortKey(value: string | null | undefined): value is Album
  * arbitrary one the grouping map happened to produce.
  */
 export function sortAlbums(albums: AlbumSummary[], key: AlbumSortKey): AlbumSummary[] {
-  const added = (a: AlbumSummary) => (a.addedAtUtc ? Date.parse(a.addedAtUtc) : 0)
-  const compare: Record<AlbumSortKey, (a: AlbumSummary, b: AlbumSummary) => number> = {
-    recent: (a, b) => added(b) - added(a),
+  if (key === "recent") {
+    // The default sort, and the one a ten-thousand-song library pays for most often: parsing
+    // `addedAtUtc` from inside the comparator re-parses it on every one of a sort's ~n·log n
+    // comparisons. Precompute it once per album instead; the tie-break stays on the items
+    // themselves, since artist/title comparisons are cheap already.
+    const withAdded = albums.map((album) => ({
+      album,
+      added: album.addedAtUtc ? Date.parse(album.addedAtUtc) : 0,
+    }))
+    withAdded.sort((a, b) => b.added - a.added || byArtistThenTitle(a.album, b.album))
+    return withAdded.map((a) => a.album)
+  }
+  const compare: Record<Exclude<AlbumSortKey, "recent">, (a: AlbumSummary, b: AlbumSummary) => number> = {
     artist: () => 0,
     title: (a, b) => a.title.localeCompare(b.title),
     year: (a, b) => (b.year ?? 0) - (a.year ?? 0),
@@ -837,6 +847,66 @@ export function sortAlbums(albums: AlbumSummary[], key: AlbumSortKey): AlbumSumm
   }
   const primary = compare[key]
   return [...albums].sort((a, b) => primary(a, b) || byArtistThenTitle(a, b))
+}
+
+// ── Overview shelf ordering ──────────────────────────────────────────────────
+// LibraryOverviewV2's shelves used to call their key function from inside the sort comparator —
+// hashing a ~100-character key or parsing a date on every one of a comparator's ~n·log n calls,
+// when the key is really a property of the item, computed once. These decorate (map to item +
+// key), sort on the key, then undecorate; `Array.prototype.sort` is stable, so the order is
+// exactly what calling the key function from the comparator gave, just without redoing the work.
+
+/**
+ * A per-visit "random" order that stays stable across a silent background refetch of the same
+ * items: hashing each item's key together with a seed set once per page mount is what makes a
+ * shelf look randomly ordered between visits without reshuffling under your thumb while a live
+ * refresh replaces the array it reads from.
+ */
+export function seededOrder<T>(items: readonly T[], keyOf: (item: T) => string, seed: string): T[] {
+  const hash = (s: string): number => {
+    let h = 5381
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0
+    return h
+  }
+  return items
+    .map((item) => ({ item, k: hash(keyOf(item) + seed) }))
+    .sort((a, b) => a.k - b.k)
+    .map((d) => d.item)
+}
+
+/** Most recent `lastPlayedAtUtc` across an album's songs, epoch ms (0 = never played). */
+function albumLastPlayedTime(
+  a: AlbumSummary,
+  lastPlayedOf: (song: ApiSong) => string | null | undefined,
+): number {
+  let max = 0
+  for (const s of a.songs) {
+    const at = lastPlayedOf(s)
+    const t = at ? Date.parse(at) : 0
+    if (t > max) max = t
+  }
+  return max
+}
+
+/** Albums with at least one play, most recently played first — the Overview's "Last played" shelf. */
+export function sortAlbumsByLastPlayed(
+  albums: readonly AlbumSummary[],
+  // The row's own stamp goes stale at the first play; a caller that knows of later plays says so.
+  lastPlayedOf: (song: ApiSong) => string | null | undefined = (song) => song.lastPlayedAtUtc,
+): AlbumSummary[] {
+  return albums
+    .map((album) => ({ album, at: albumLastPlayedTime(album, lastPlayedOf) }))
+    .filter((d) => d.at > 0)
+    .sort((a, b) => b.at - a.at)
+    .map((d) => d.album)
+}
+
+/** Songs ordered by most recently liked first — the Overview's "Favourite tracks" shelf. */
+export function sortSongsByRecentlyLiked(songs: readonly ApiSong[]): ApiSong[] {
+  return songs
+    .map((song) => ({ song, at: Date.parse(song.likedAtUtc ?? "") }))
+    .sort((a, b) => b.at - a.at)
+    .map((d) => d.song)
 }
 
 // ── Organize-by grouping (Artist / Year) ───────────────────────────────────────
