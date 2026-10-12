@@ -229,6 +229,9 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IArtistCreditRepairHealer, ArtistCreditRepairHealer>();
         services.AddScoped<IArtistDuplicateService, ArtistDuplicateService>();
         services.AddScoped<IAlbumDuplicateDetector, AlbumDuplicateDetector>();
+        // Outlives the request on purpose: it is what lets the next page load skip a detection.
+        services.AddSingleton<DetectionCountMemo>();
+        services.AddScoped<IInboxNameCounter, InboxNameCounter>();
         services.AddScoped<IDedupActionHistory, DedupActionHistoryService>();
 
         // History feed. Every source derives its entries from rows the pipeline already writes, and all

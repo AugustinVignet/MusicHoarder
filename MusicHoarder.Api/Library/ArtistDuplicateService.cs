@@ -42,6 +42,16 @@ public interface IArtistDuplicateService
     Task<ArtistDuplicateReport> DetectAsync(Guid ownerUserId, CancellationToken ct = default);
 
     /// <summary>
+    /// How many clusters and combined credits <see cref="DetectAsync"/> would report for this owner,
+    /// together, from songs the caller has already read for several detectors at once (see
+    /// <see cref="InboxNameCounter"/>): <paramref name="library"/> is every song that is not
+    /// deleted, synthetic or the demo account's, in id order, carrying at least
+    /// <see cref="ArtistDuplicateService.CountColumns"/>. The count is remembered for as long as the
+    /// names, the dismissals and the settings it came from stay the same.
+    /// </summary>
+    Task<int> CountAsync(Guid ownerUserId, IReadOnlyList<SongMetadata> library, CancellationToken ct = default);
+
+    /// <summary>
     /// Rewrites every whole-field occurrence of the variant spellings (Artist / AlbumArtist) and
     /// every matching segment of the discrete Artists list to the canonical spelling, audits each
     /// change, re-queues built rows for re-tag, and stores <see cref="ArtistAlias"/> rows so heals
@@ -66,6 +76,7 @@ public interface IArtistDuplicateService
 public sealed class ArtistDuplicateService(
     MusicHoarderDbContext db,
     IOptions<MusicEnricherOptions> options,
+    DetectionCountMemo memo,
     ILogger<ArtistDuplicateService> logger) : IArtistDuplicateService
 {
     private const string MergeChangeSource = "artist-merge";
@@ -95,6 +106,64 @@ public sealed class ArtistDuplicateService(
             options.Value.ArtistMergeFuzzyThreshold,
             options.Value.ArtistMergeIdentityFuzzyThreshold,
             options.Value.DuplicateMaxBlockSize);
+    }
+
+    /// <summary>
+    /// What <see cref="CountAsync"/> needs on a row it did not load itself: the columns detection
+    /// reads, and the one the rest of <see cref="QueryEligible"/>'s filter tests.
+    /// </summary>
+    internal static readonly SongColumnSet CountColumns = DetectColumns.With(nameof(SongMetadata.OwnerUserId));
+
+    public async Task<int> CountAsync(
+        Guid ownerUserId, IReadOnlyList<SongMetadata> library, CancellationToken ct = default)
+    {
+        // The part of QueryEligible the shared read has not applied.
+        var songs = library.Where(s => s.OwnerUserId == ownerUserId).ToList();
+        var dismissed = await LoadDismissedPairsAsync(ownerUserId, ct);
+        var threshold = options.Value.ArtistMergeFuzzyThreshold;
+        var identityFloor = options.Value.ArtistMergeIdentityFuzzyThreshold;
+        var maxIdBlock = options.Value.DuplicateMaxBlockSize;
+
+        // The stamp and the detection take the same five arguments. Detect gets copies that carry
+        // DetectColumns only — these rows hold other detectors' columns too, and a column the stamp
+        // does not cover must be one Detect cannot see.
+        return memo.GetOrCount(
+            nameof(ArtistDuplicateService),
+            ownerUserId,
+            StampOf(songs, dismissed, threshold, identityFloor, maxIdBlock),
+            () =>
+            {
+                var report = Detect(DetectColumns.Copy(songs), dismissed, threshold, identityFloor, maxIdBlock);
+                return report.Clusters.Count + report.CombinedCredits.Count;
+            });
+    }
+
+    /// <summary>
+    /// A fingerprint of everything <see cref="Detect"/> is given, parameter for parameter: its
+    /// columns of its songs in order, the dismissed pairs (which it only looks up, so in a fixed
+    /// order) and the three settings. A parameter added to one must be added to the other.
+    /// </summary>
+    internal static byte[] StampOf(
+        IReadOnlyList<SongMetadata> songs,
+        HashSet<(string Low, string High)> dismissed,
+        double threshold,
+        double identityFloor,
+        int maxIdBlock)
+    {
+        using var stamp = new ContentStamp();
+        DetectColumns.AddTo(stamp, songs);
+        stamp.Add(dismissed.Count);
+        foreach (var (low, high) in dismissed
+            .OrderBy(p => p.Low, StringComparer.Ordinal)
+            .ThenBy(p => p.High, StringComparer.Ordinal))
+        {
+            stamp.Add(low);
+            stamp.Add(high);
+        }
+        stamp.Add(threshold);
+        stamp.Add(identityFloor);
+        stamp.Add(maxIdBlock);
+        return stamp.Finish();
     }
 
     /// <summary>

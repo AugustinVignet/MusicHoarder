@@ -22,6 +22,15 @@ public interface IAlbumDuplicateDetector
     /// <summary>Near-duplicate album pairs for one owner — titles <see cref="AlbumGroupKey"/> keeps
     /// apart but that normalize/fuzzy-match together. Read-only; respects dismissals.</summary>
     Task<IReadOnlyList<AlbumDuplicatePair>> DetectAsync(Guid ownerUserId, CancellationToken ct = default);
+
+    /// <summary>
+    /// How many pairs <see cref="DetectAsync"/> would report for this owner, from songs the caller
+    /// has already read for several detectors at once (see <see cref="InboxNameCounter"/>):
+    /// <paramref name="library"/> is every song that is not deleted, synthetic or the demo account's,
+    /// in id order, carrying at least <see cref="AlbumDuplicateDetector.CountColumns"/>. The count is
+    /// remembered for as long as the names, the dismissals and the threshold it came from stay the same.
+    /// </summary>
+    Task<int> CountAsync(Guid ownerUserId, IReadOnlyList<SongMetadata> library, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -33,7 +42,8 @@ public interface IAlbumDuplicateDetector
 /// </summary>
 public sealed class AlbumDuplicateDetector(
     MusicHoarderDbContext db,
-    IOptions<MusicEnricherOptions> options) : IAlbumDuplicateDetector
+    IOptions<MusicEnricherOptions> options,
+    DetectionCountMemo memo) : IAlbumDuplicateDetector
 {
     /// <summary>
     /// Every song column <see cref="Detect"/> reads: the album title and the fields
@@ -60,16 +70,73 @@ public sealed class AlbumDuplicateDetector(
             .Where(s => s.Album != null && s.Album != "")
             .WithOnly(db, DetectColumns)
             .ToListAsync(ct);
+        var dismissedPairs = await LoadDismissedPairsAsync(ownerUserId, ct);
 
+        return Detect(songs, dismissedPairs, options.Value.AlbumMergeFuzzyThreshold);
+    }
+
+    /// <summary>
+    /// What <see cref="CountAsync"/> needs on a row it did not load itself: the columns detection
+    /// reads, and the one the rest of <see cref="DetectAsync"/>'s filter tests.
+    /// </summary>
+    internal static readonly SongColumnSet CountColumns = DetectColumns.With(nameof(SongMetadata.IsDuplicate));
+
+    public async Task<int> CountAsync(
+        Guid ownerUserId, IReadOnlyList<SongMetadata> library, CancellationToken ct = default)
+    {
+        // The part of DetectAsync's filter the shared read has not applied.
+        var songs = library
+            .Where(s => s.OwnerUserId == ownerUserId && !s.IsDuplicate && !string.IsNullOrEmpty(s.Album))
+            .ToList();
+        var dismissedPairs = await LoadDismissedPairsAsync(ownerUserId, ct);
+        var threshold = options.Value.AlbumMergeFuzzyThreshold;
+
+        // The stamp and the detection take the same three arguments. Detect gets copies that carry
+        // DetectColumns only — these rows hold other detectors' columns too, and a column the stamp
+        // does not cover must be one Detect cannot see.
+        return memo.GetOrCount(
+            nameof(AlbumDuplicateDetector),
+            ownerUserId,
+            StampOf(songs, dismissedPairs, threshold),
+            () => Detect(DetectColumns.Copy(songs), dismissedPairs, threshold).Count);
+    }
+
+    /// <summary>
+    /// A fingerprint of everything <see cref="Detect"/> is given, parameter for parameter: its
+    /// columns of its songs in order, the dismissals (which it only looks up, so in a fixed order)
+    /// and the threshold. A parameter added to one must be added to the other.
+    /// </summary>
+    internal static byte[] StampOf(
+        IReadOnlyList<SongMetadata> songs,
+        HashSet<(string Scope, string Low, string High)> dismissedPairs,
+        double threshold)
+    {
+        using var stamp = new ContentStamp();
+        DetectColumns.AddTo(stamp, songs);
+        stamp.Add(dismissedPairs.Count);
+        foreach (var (scope, low, high) in dismissedPairs
+            .OrderBy(p => p.Scope, StringComparer.Ordinal)
+            .ThenBy(p => p.Low, StringComparer.Ordinal)
+            .ThenBy(p => p.High, StringComparer.Ordinal))
+        {
+            stamp.Add(scope);
+            stamp.Add(low);
+            stamp.Add(high);
+        }
+        stamp.Add(threshold);
+        return stamp.Finish();
+    }
+
+    private async Task<HashSet<(string Scope, string Low, string High)>> LoadDismissedPairsAsync(
+        Guid ownerUserId, CancellationToken ct)
+    {
         var dismissed = await db.DedupDismissals
             .IgnoreQueryFilters()
             .AsNoTracking()
             .Where(d => d.OwnerUserId == ownerUserId && d.Kind == DedupDismissalKind.AlbumPair)
             .Select(d => new { d.ScopeKey, d.KeyLow, d.KeyHigh })
             .ToListAsync(ct);
-        var dismissedPairs = dismissed.Select(d => (d.ScopeKey, d.KeyLow, d.KeyHigh)).ToHashSet();
-
-        return Detect(songs, dismissedPairs, options.Value.AlbumMergeFuzzyThreshold);
+        return dismissed.Select(d => (d.ScopeKey, d.KeyLow, d.KeyHigh)).ToHashSet();
     }
 
     /// <summary>

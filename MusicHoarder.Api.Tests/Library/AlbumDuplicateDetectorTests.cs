@@ -231,9 +231,96 @@ public class AlbumDuplicateDetectorTests
         }
     }
 
-    private static AlbumDuplicateDetector Detector(MusicHoarderDbContext db) => new(
+    // --- Count (remembered) ---
+
+    // The count is remembered under a stamp of Detect's arguments, so the two must take the same
+    // ones: give Detect an argument the stamp lacks, and a change to it leaves a stale count standing.
+    [Fact]
+    public void StampOf_TakesExactlyTheArgumentsOfDetect()
+    {
+        static (string?, Type)[] Parameters(string method) => typeof(AlbumDuplicateDetector)
+            .GetMethod(method, System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!
+            .GetParameters().Select(p => (p.Name, p.ParameterType)).ToArray();
+
+        Assert.Equal(Parameters(nameof(AlbumDuplicateDetector.Detect)), Parameters(nameof(AlbumDuplicateDetector.StampOf)));
+    }
+
+    [Fact]
+    public void StampOf_ChangesWithEveryArgument_AndWithNothingElse()
+    {
+        SongMetadata[] songs = [Song("/a/1.mp3", album: "The Blueprint 3", track: 1), Song("/b/1.mp3", album: "Blueprint 3", track: 1)];
+        HashSet<(string, string, string)> dismissed = [("jay z", "blueprint 3", "the blueprint 3"), ("jay z", "a", "b")];
+        var stamp = AlbumDuplicateDetector.StampOf(songs, dismissed, 90);
+
+        Assert.Equal(stamp, AlbumDuplicateDetector.StampOf(songs, dismissed, 90));
+        // A set: the order its pairs were added in is not an input.
+        Assert.Equal(stamp, AlbumDuplicateDetector.StampOf(songs, [.. dismissed.Reverse()], 90));
+        Assert.NotEqual(stamp, AlbumDuplicateDetector.StampOf([songs[1], songs[0]], dismissed, 90));
+        Assert.NotEqual(stamp, AlbumDuplicateDetector.StampOf(songs, [dismissed.First()], 90));
+        Assert.NotEqual(stamp, AlbumDuplicateDetector.StampOf(songs, [("jay z", "blueprint 3", "the blueprint 3"), ("jay z", "a", "c")], 90));
+        Assert.NotEqual(stamp, AlbumDuplicateDetector.StampOf(songs, dismissed, 91));
+
+        // Played, re-tagged, rebuilt: nothing detection reads.
+        songs[0].PlayCount = 12;
+        songs[0].Title = "What We Talkin' About";
+        songs[0].LibraryBuildStatus = LibraryBuildStatus.Done;
+        Assert.Equal(stamp, AlbumDuplicateDetector.StampOf(songs, dismissed, 90));
+
+        songs[0].Album = "The Blueprint III";
+        Assert.NotEqual(stamp, AlbumDuplicateDetector.StampOf(songs, dismissed, 90));
+    }
+
+    [Fact]
+    public async Task CountAsync_IsAnsweredFromMemory_UntilSomethingDetectionReadsChanges()
+    {
+        await using var db = NewContext();
+        db.Songs.AddRange(
+            Song("/a/1.mp3", album: "The Blueprint 3", track: 1),
+            Song("/b/1.mp3", album: "Blueprint 3", track: 1));
+        await db.SaveChangesAsync();
+        var threshold = new MusicEnricherOptions().AlbumMergeFuzzyThreshold;
+        var memo = new DetectionCountMemo();
+        Task<List<SongMetadata>> Library() => db.Songs.AsNoTracking().OrderBy(s => s.Id).ToListAsync();
+
+        // A count planted under the stamp of these very inputs tells a remembered answer (99) from
+        // a detection (1): nothing else distinguishes them, which is the point.
+        memo.GetOrCount(nameof(AlbumDuplicateDetector), Owner,
+            AlbumDuplicateDetector.StampOf(await Library(), [], threshold), () => 99);
+        Assert.Equal(99, await Detector(db, memo).CountAsync(Owner, await Library()));
+
+        // A play is a write to the row, and to nothing detection reads.
+        (await db.Songs.FirstAsync()).PlayCount += 1;
+        await db.SaveChangesAsync();
+        Assert.Equal(99, await Detector(db, memo).CountAsync(Owner, await Library()));
+
+        // Another account's library is another count, whatever is remembered for this one.
+        Assert.Equal(0, await Detector(db, memo).CountAsync(Guid.NewGuid(), await Library()));
+
+        // A dismissal is an input: counted again, and the pair is gone.
+        db.DedupDismissals.Add(new DedupDismissal
+        {
+            OwnerUserId = Owner,
+            Kind = DedupDismissalKind.AlbumPair,
+            ScopeKey = AlbumGroupKey.ComputeArtistKey("JAY-Z"),
+            KeyLow = "blueprint 3",
+            KeyHigh = "the blueprint 3",
+            CreatedAtUtc = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+        Assert.Equal(0, await Detector(db, memo).CountAsync(Owner, await Library()));
+
+        // So is a name: a misspelt copy of another album is a new pair.
+        db.Songs.Add(Song("/c/1.mp3", album: "My Beautiful Dark Twisted Fantasy", track: 1));
+        db.Songs.Add(Song("/d/1.mp3", album: "My Beautiful Dark Twistd Fantasy", track: 1));
+        await db.SaveChangesAsync();
+        Assert.Equal(1, await Detector(db, memo).CountAsync(Owner, await Library()));
+        Assert.Single(await Detector(db).DetectAsync(Owner));
+    }
+
+    private static AlbumDuplicateDetector Detector(MusicHoarderDbContext db, DetectionCountMemo? memo = null) => new(
         db,
-        Microsoft.Extensions.Options.Options.Create(new MusicEnricherOptions()));
+        Microsoft.Extensions.Options.Options.Create(new MusicEnricherOptions()),
+        memo ?? new DetectionCountMemo());
 
     private static MusicHoarderDbContext NewContext()
     {

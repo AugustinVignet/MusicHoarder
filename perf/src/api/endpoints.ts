@@ -48,6 +48,9 @@ export const ENDPOINTS: Endpoint[] = [
 
   // What the shell asks for on every document load to fill the Inbox badges and status rows.
   { name: 'Duplicate tracks', group: 'On every start, for the admin', path: () => '/api/library/duplicates', budget: { p95Ms: 200 } },
+  { name: 'Inbox name counts', group: 'On every start, for the admin', path: () => '/api/inbox/name-counts', budget: { p95Ms: 300 } },
+  // The three reports those two counts stand in for. Only the Inbox's Artist names and Album names
+  // pages ask for them now; they stay in this group so a run still lines up with the ones before it.
   { name: 'Duplicate albums', group: 'On every start, for the admin', path: () => '/api/library/albums/duplicates', budget: { p95Ms: 200 } },
   { name: 'Duplicate artists', group: 'On every start, for the admin', path: () => '/api/library/artists/duplicates', budget: { p95Ms: 200 } },
   { name: 'Split albums', group: 'On every start, for the admin', path: () => '/api/enrichment/split-albums', budget: { p95Ms: 200 } },

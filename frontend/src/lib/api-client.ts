@@ -4300,6 +4300,23 @@ export async function dismissAlbumDuplicates(artist: string, albumA: string, alb
   })
 }
 
+/** How many suggestions the Inbox's two name queues hold. */
+export interface InboxNameCounts {
+  /** Artist names: variant-spelling clusters plus combined credits. */
+  artists: number
+  /** Album names: split albums plus duplicate-name pairs. */
+  albums: number
+}
+
+/**
+ * The Artist names and Album names counts, without their reports. For the shell's badges, which
+ * show two numbers on every page: each of the three reports behind them makes the server walk the
+ * whole library, and this counts all three from one walk.
+ */
+export async function fetchInboxNameCounts(): Promise<InboxNameCounts> {
+  return requestJson<InboxNameCounts>("/api/inbox/name-counts")
+}
+
 // ── Dedup action history (merges / splits / heals, with revert) ────────────────
 
 export interface DedupAction {

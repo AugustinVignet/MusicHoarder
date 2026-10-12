@@ -30,6 +30,16 @@ public interface IAlbumSplitHealer
     Task<IReadOnlyList<AlbumSplitGroup>> DetectAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// How many groups <see cref="DetectAsync(CancellationToken)"/> would report, from songs the
+    /// caller has already read for several detectors at once (see <see cref="InboxNameCounter"/>):
+    /// <paramref name="library"/> is every song that is not deleted, synthetic or the demo account's,
+    /// carrying at least <see cref="AlbumSplitHealer.CountColumns"/>. Like the dry run, it counts
+    /// every account's albums, and it <b>changes the rows it is given</b> to do so: call it last,
+    /// on rows nothing else will read.
+    /// </summary>
+    Task<int> CountAsync(IReadOnlyList<SongMetadata> library, CancellationToken ct = default);
+
+    /// <summary>
     /// The split-album safeguard: groups all buildable songs by logical album, elects one
     /// deterministic <see cref="AlbumIdentity"/> per group via <see cref="IAlbumIdentityReconciler"/>,
     /// persists it to every member that disagrees (<see cref="SongMetadata.ApplyIdentityCorrection"/>)
@@ -92,6 +102,25 @@ public sealed class AlbumSplitHealer(
     {
         var songs = await QueryEligible().WithOnly(db, DetectColumns).ToListAsync(ct);
         return await DetectAsync(songs, ct);
+    }
+
+    /// <summary>
+    /// What <see cref="CountAsync"/> needs on a row it did not load itself: the columns the dry run
+    /// reads, and the ones the rest of <see cref="QueryEligible"/>'s filter tests.
+    /// </summary>
+    internal static readonly SongColumnSet CountColumns = DetectColumns.With(
+        nameof(SongMetadata.IsDuplicate), nameof(SongMetadata.EnrichmentStatus));
+
+    // Not remembered between calls the way the two duplicate counts are. Besides the songs, the dry
+    // run reads the canonical albums and their tracklists, the alias map and, group by group, the
+    // heal's own change log; a remembered count would have to be stamped with every one of those.
+    public async Task<int> CountAsync(IReadOnlyList<SongMetadata> library, CancellationToken ct = default)
+    {
+        // The part of QueryEligible the shared read has not applied.
+        var songs = library
+            .Where(s => !s.IsDuplicate && !s.IsUnreleased && s.EnrichmentStatus == EnrichmentStatus.Matched)
+            .ToList();
+        return (await DetectAsync(songs, ct)).Count;
     }
 
     /// <summary>
