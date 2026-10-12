@@ -24,7 +24,12 @@
   import TrackRowMenu, { activateTrack } from '$lib/components/v2/TrackRowMenu.svelte';
   import TrackRowText from '$lib/components/v2/TrackRowText.svelte';
   import { longpress, type LongPressPoint } from '$lib/actions/long-press';
-  import { coverUrlForSong, toPlayerSong, type ApiSong } from '$lib/api-client';
+  import {
+    rowCoverFallbackForSong,
+    rowCoverUrlForSong,
+    toPlayerSong,
+    type ApiSong
+  } from '$lib/api-client';
   import { formatDuration, formatTotalDuration } from '$lib/formatters';
   import { IsMobile } from '$lib/hooks/is-mobile.svelte';
   import { missingLabel, playlistKindLabel, trackCountLabel, sourceLabel } from '$lib/playlists';
@@ -264,7 +269,8 @@
         <Cover
           artist={fallbackArtist(song)}
           title={song.album ?? titleOf(song)}
-          coverUrl={coverUrlForSong(song)}
+          coverUrl={rowCoverUrlForSong(song)}
+          fallbackUrl={rowCoverFallbackForSong(song)}
           size={48}
           corner={6}
           caption={false}

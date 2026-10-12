@@ -54,10 +54,11 @@
   import {
     ALBUM_SORT_OPTIONS,
     buildArtistGroups,
-    coverUrlForSong,
     fetchAlbumCanonicalStatuses,
     getArtistImageUrl,
     isAlbumSortKey,
+    rowCoverFallbackForSong,
+    rowCoverUrlForSong,
     sortAlbums,
     type AlbumSortKey,
     type AlbumStatusInfo,
@@ -936,7 +937,8 @@
         <Cover
           artist={fallbackArtist(song)}
           title={song.album ?? titleOf(song)}
-          coverUrl={coverUrlForSong(song)}
+          coverUrl={rowCoverUrlForSong(song)}
+          fallbackUrl={rowCoverFallbackForSong(song)}
           size={48}
           corner={6}
           caption={false}

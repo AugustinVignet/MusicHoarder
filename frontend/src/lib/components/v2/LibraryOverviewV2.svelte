@@ -9,8 +9,9 @@
   import TrackRowText from '$lib/components/v2/TrackRowText.svelte';
   import { longpress, type LongPressPoint } from '$lib/actions/long-press';
   import {
-    coverUrlForSong,
     isSpotifyLiked,
+    rowCoverFallbackForSong,
+    rowCoverUrlForSong,
     seededOrder,
     sortAlbumsByLastPlayed,
     sortAlbumsByRecency,
@@ -323,7 +324,8 @@
                     <Cover
                       artist={fallbackArtist(song)}
                       title={song.album ?? song.title ?? song.fileName}
-                      coverUrl={coverUrlForSong(song)}
+                      coverUrl={rowCoverUrlForSong(song)}
+                      fallbackUrl={rowCoverFallbackForSong(song)}
                       size={48}
                       corner={6}
                       caption={false}

@@ -15,9 +15,10 @@
   import { formatDuration, formatFamily, formatFileSize } from '$lib/formatters';
   import {
     albumKeyForSong,
-    coverUrlForSong,
     isSpotifySourced,
     mapEnrichmentStatus,
+    rowCoverFallbackForSong,
+    rowCoverUrlForSong,
     songOriginLabel,
     toPlayerSong,
     type ApiSong
@@ -387,7 +388,8 @@
                   <Cover
                     artist={artistOf(song)}
                     title={song.album ?? titleOf(song)}
-                    coverUrl={coverUrlForSong(song)}
+                    coverUrl={rowCoverUrlForSong(song)}
+                    fallbackUrl={rowCoverFallbackForSong(song)}
                     size={48}
                     corner={6}
                     caption={false}
@@ -476,7 +478,8 @@
               <Cover
                 artist={artistOf(song)}
                 title={song.album ?? titleOf(song)}
-                coverUrl={coverUrlForSong(song)}
+                coverUrl={rowCoverUrlForSong(song)}
+                fallbackUrl={rowCoverFallbackForSong(song)}
                 size={36}
                 corner={4}
                 caption={false}

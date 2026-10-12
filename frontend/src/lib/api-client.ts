@@ -138,6 +138,8 @@ export interface ApiSong {
   enrichmentStatus?: string | number | null
   /** When the scanner first indexed the file (always set). */
   indexedAtUtc?: string | null
+  /** Set on a soft-deleted row, which the list only carries when asked to include them. */
+  deletedAtUtc?: string | null
   /**
    * When the track entered the collection — stamped once at first index and never rewritten. This is
    * the field "recently added" sorts on: `indexedAtUtc` moves whenever the file changes on disk and
@@ -1285,6 +1287,7 @@ export async function fetchSongs(includeDeleted = false): Promise<ApiSong[]> {
   // with them, scoped server-side from their grants. There is no client-side library mode.
   const result = await requestJson<SongsResponse>(`/songs?includeDeleted=${includeDeleted}`)
   grantors = result.grantors ?? []
+  rememberFolderCovers(result.songs ?? [])
   return result.songs ?? []
 }
 
@@ -1297,6 +1300,7 @@ export async function fetchSongsIfChanged(etag: string | null): Promise<Revalida
   const result = await requestJsonIfChanged<SongsResponse>("/songs?includeDeleted=false", etag)
   if (result.notModified) return result
   grantors = result.data.grantors ?? []
+  rememberFolderCovers(result.data.songs ?? [])
   return { ...result, data: result.data.songs ?? [] }
 }
 
@@ -2595,6 +2599,127 @@ export function coverThumbUrl(url: string | null | undefined, size: number): str
 export function coverUrlForSong(song: ApiSong): string | null {
   if (song.albumArt) return song.albumArt
   return song.hasCoverArt ? getSongCoverUrl(song.id) : null
+}
+
+// ── One cover per album folder, for track rows ───────────────────────────────
+
+/**
+ * The album folder the library builder put this track in, or null for a row that takes no part in
+ * {@link electFolderCovers}: one shared with you (its destination path is not published), one not
+ * built, a soft-deleted one (the cover endpoint answers 404 for it), and the demo library's rows,
+ * which are "built" in place — destination and source are one file, so no builder ever wrote a
+ * cover into that folder.
+ */
+function builtFolderOf(song: ApiSong): string | null {
+  const path = song.destinationPath
+  if (song.isBuilt !== true || !path || song.sharedByUserId || song.deletedAtUtc) return null
+  if (path === song.sourcePath) return null
+  // Split where the server would: a POSIX path only on "/", a Windows one on either separator.
+  const cut = path.startsWith("/")
+    ? path.lastIndexOf("/")
+    : Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"))
+  return cut > 0 ? path.slice(0, cut) : null
+}
+
+/**
+ * Which other song's cover each track row can show instead of asking for its own: for every row
+ * whose picture is its album folder's, the id of the track standing in for that folder. Rows that
+ * keep their own cover are absent.
+ *
+ * Each row used to ask for `/songs/{its own id}/cover`, so the twelve tracks of one album were
+ * twelve URLs: a request and an image decode per row for a single picture, all of it paid while
+ * scrolling. They are one picture because of how the server answers for a built track — the
+ * `cover/folder/front.*` image in its destination folder wins over the file's embedded art
+ * (`CoverArtResolver`), and the builder writes that `cover.*` into every album folder it finds art
+ * for — so those rows can share one URL, and one cache entry.
+ *
+ * The list does not say whether a folder has that image, and without it every track answers with
+ * its own embedded picture. So a folder shares only when nothing in the list hints that it is
+ * missing, and each rule below falls back to the row's own id, which is always right:
+ *
+ * - Every built track in the folder is flagged as having art. Writing a folder cover flags all of
+ *   them (`DestinationCoverFlagger`), so one unflagged track means no image was written there.
+ * - At least one of them is not unreleased material. The builder files an artist's unreleased
+ *   tracks together in one folder and writes no cover into it, because they are unrelated
+ *   recordings; `releaseClassification` reads "Unreleased" for every such row.
+ *
+ * The first track in list order stands in for the rest, so the choice is stable from one load to
+ * the next — skipping any with a music video, whose thumbnail is the cover of last resort for a
+ * track with no art and must not become its album's picture. Album cards are not involved: they
+ * show the server-elected `coverSongId`.
+ *
+ * What the list cannot rule out is a folder with no image whose tracks are nevertheless all
+ * flagged (art embedded in each, and the folder cover never written or since removed). Its rows
+ * show the stand-in's embedded picture rather than their own. Only the server can close that, by
+ * saying which cover a row resolves to; until it does, do not loosen the rules above.
+ */
+export function electFolderCovers(songs: readonly ApiSong[]): Map<number, number> {
+  type Folder = { ids: number[]; standIn: number | null; allHaveArt: boolean; anyReleased: boolean }
+  const folders = new Map<string, Folder>()
+  for (const song of songs) {
+    const key = builtFolderOf(song)
+    if (key === null) continue
+    let folder = folders.get(key)
+    if (!folder) {
+      folder = { ids: [], standIn: null, allHaveArt: true, anyReleased: false }
+      folders.set(key, folder)
+    }
+    folder.ids.push(song.id)
+    if (folder.standIn === null && !song.hasMusicVideo) folder.standIn = song.id
+    if (!song.hasCoverArt) folder.allHaveArt = false
+    if (song.releaseClassification !== "Unreleased") folder.anyReleased = true
+  }
+
+  const coverIds = new Map<number, number>()
+  for (const { ids, standIn, allHaveArt, anyReleased } of folders.values()) {
+    if (standIn === null || !allHaveArt || !anyReleased) continue
+    for (const id of ids) if (id !== standIn) coverIds.set(id, standIn)
+  }
+  return coverIds
+}
+
+/**
+ * {@link electFolderCovers} over the most recent `fetchSongs()`.
+ *
+ * Module state like {@link grantors}, and just as unreactive: rebuilt only when the whole list is
+ * replaced, which is also when every row on screen becomes a new object and is rendered again. A
+ * single row changing (a heart tap, a play) moves no track between folders, so it is left alone.
+ */
+let folderCoverIds: ReadonlyMap<number, number> = new Map()
+
+function rememberFolderCovers(songs: readonly ApiSong[]): void {
+  folderCoverIds = electFolderCovers(songs)
+}
+
+/** Forget the shared row covers. Called from sign-out alongside the other client-side resets. */
+export function resetFolderCovers(): void {
+  folderCoverIds = new Map()
+}
+
+/**
+ * Cover URL for a song's row in a track list: {@link coverUrlForSong}, except that the tracks of
+ * one album folder all name the same song (see {@link electFolderCovers}) and so load one image
+ * between them. Pass {@link rowCoverFallbackForSong} to the same `<Cover>`.
+ *
+ * Rows only, because a `<Cover>` can fall back when a borrowed image fails to load. The player
+ * keeps {@link coverUrlForSong}: its one URL per song also goes to the lock screen and into the
+ * saved session, where there is no second chance.
+ */
+export function rowCoverUrlForSong(song: ApiSong): string | null {
+  if (song.albumArt) return song.albumArt
+  if (!song.hasCoverArt) return null
+  return getSongCoverUrl(folderCoverIds.get(song.id) ?? song.id)
+}
+
+/**
+ * The row's own cover, as `<Cover>`'s second chance when {@link rowCoverUrlForSong} borrowed
+ * another track's and that one fails to load — the stand-in was deleted since the list loaded, or
+ * its folder has no image after all and its own art is unreadable. Null when nothing was borrowed,
+ * so a row with its own URL fails exactly as before.
+ */
+export function rowCoverFallbackForSong(song: ApiSong): string | null {
+  if (song.albumArt || !song.hasCoverArt || !folderCoverIds.has(song.id)) return null
+  return getSongCoverUrl(song.id)
 }
 
 /**
