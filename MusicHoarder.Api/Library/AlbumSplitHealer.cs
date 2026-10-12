@@ -52,11 +52,56 @@ public sealed class AlbumSplitHealer(
 {
     private const string ChangeSource = "album-identity-heal";
 
+    /// <summary>
+    /// Every song column the dry run reads, and so all it loads: what <see cref="AlbumGroupKey.For"/>
+    /// keys on, what <see cref="IAlbumIdentityReconciler.Reconcile"/> votes over and
+    /// <see cref="SongMetadata.ApplyIdentityCorrection"/> compares, what the destination path is
+    /// built from, and what the album-artist restore checks. A property read on that path that is
+    /// not in this list is always blank. <see cref="HealAsync"/> loads whole rows — it saves them.
+    /// <para>
+    /// <see cref="SongMetadata.CaptureOriginalMetadata"/> also copies the ISRC, the recording and
+    /// Spotify ids and the track total into the row's <c>Original*</c> fields. Nothing in the dry
+    /// run reads those copies and the rows are thrown away, so they are left out.
+    /// </para>
+    /// </summary>
+    internal static readonly SongColumnSet DetectColumns = new(
+        nameof(SongMetadata.Id),
+        nameof(SongMetadata.OwnerUserId),
+        nameof(SongMetadata.Album),
+        nameof(SongMetadata.AlbumArtist),
+        nameof(SongMetadata.AlbumArtistMusicBrainzId),
+        nameof(SongMetadata.Artist),
+        nameof(SongMetadata.Artists),
+        nameof(SongMetadata.Title),
+        nameof(SongMetadata.Year),
+        nameof(SongMetadata.IsCompilation),
+        nameof(SongMetadata.TrackNumber),
+        nameof(SongMetadata.DiscNumber),
+        nameof(SongMetadata.TotalDiscs),
+        nameof(SongMetadata.ReleaseTypePrimary),
+        nameof(SongMetadata.ReleaseTypes),
+        nameof(SongMetadata.MusicBrainzReleaseId),
+        nameof(SongMetadata.MusicBrainzReleaseGroupId),
+        nameof(SongMetadata.AcquisitionIntent),
+        // The destination path only: the file name, and the folder of an unreleased track.
+        nameof(SongMetadata.FileName),
+        nameof(SongMetadata.Extension),
+        nameof(SongMetadata.IsUnreleased));
+
     public async Task<IReadOnlyList<AlbumSplitGroup>> DetectAsync(CancellationToken ct = default)
     {
-        // Untracked copies: the restore and ApplyIdentityCorrection below mutate them to count would-be
-        // changes with the exact heal logic, but nothing is saved.
-        var songs = await QueryEligible().WithoutHeavyText(db).ToListAsync(ct);
+        var songs = await QueryEligible().WithOnly(db, DetectColumns).ToListAsync(ct);
+        return await DetectAsync(songs, ct);
+    }
+
+    /// <summary>
+    /// The dry run over rows already loaded. They must be untracked copies: the restore and
+    /// ApplyIdentityCorrection below mutate them to count would-be changes with the exact heal logic,
+    /// but nothing is saved.
+    /// </summary>
+    internal async Task<IReadOnlyList<AlbumSplitGroup>> DetectAsync(
+        IReadOnlyList<SongMetadata> songs, CancellationToken ct)
+    {
         var canonicalAlbums = await LoadCanonicalAlbumsAsync(ct);
         var artistAliases = await ArtistAliasMap.LoadAsync(db, ct);
         var (restored, _) = await RestoreForeignAlbumArtistsAsync(songs, canonicalAlbums, DateTime.UtcNow, persist: false, ct);

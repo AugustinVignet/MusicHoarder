@@ -35,6 +35,19 @@ public sealed class AlbumDuplicateDetector(
     MusicHoarderDbContext db,
     IOptions<MusicEnricherOptions> options) : IAlbumDuplicateDetector
 {
+    /// <summary>
+    /// Every song column <see cref="Detect"/> reads: the album title and the fields
+    /// <see cref="AlbumGroupKey.For"/> keys an album on. A name compare over the whole library has no
+    /// use for the other hundred, and nothing else is loaded — so a property read here that is not
+    /// in this list is always blank.
+    /// </summary>
+    internal static readonly SongColumnSet DetectColumns = new(
+        nameof(SongMetadata.OwnerUserId),
+        nameof(SongMetadata.Album),
+        nameof(SongMetadata.AlbumArtist),
+        nameof(SongMetadata.Artist),
+        nameof(SongMetadata.IsCompilation));
+
     public async Task<IReadOnlyList<AlbumDuplicatePair>> DetectAsync(
         Guid ownerUserId, CancellationToken ct = default)
     {
@@ -45,7 +58,7 @@ public sealed class AlbumDuplicateDetector(
             .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && !s.IsDuplicate)
             .ExcludingDemoTenant()
             .Where(s => s.Album != null && s.Album != "")
-            .WithoutHeavyText(db)
+            .WithOnly(db, DetectColumns)
             .ToListAsync(ct);
 
         var dismissed = await db.DedupDismissals
@@ -56,6 +69,18 @@ public sealed class AlbumDuplicateDetector(
             .ToListAsync(ct);
         var dismissedPairs = dismissed.Select(d => (d.ScopeKey, d.KeyLow, d.KeyHigh)).ToHashSet();
 
+        return Detect(songs, dismissedPairs, options.Value.AlbumMergeFuzzyThreshold);
+    }
+
+    /// <summary>
+    /// The detection itself, over songs already loaded: one owner's rows that carry an album title.
+    /// Static so that the rows, the dismissals and the threshold are all it can see.
+    /// </summary>
+    internal static IReadOnlyList<AlbumDuplicatePair> Detect(
+        IReadOnlyList<SongMetadata> songs,
+        HashSet<(string Scope, string Low, string High)> dismissedPairs,
+        double threshold)
+    {
         // One entry per logical album (AlbumGroupKey), carrying its majority display spelling.
         var albums = songs
             .Select(s => (Key: AlbumGroupKey.For(s), Song: s))
@@ -89,7 +114,6 @@ public sealed class AlbumDuplicateDetector(
             })
             .ToList();
 
-        var threshold = options.Value.AlbumMergeFuzzyThreshold;
         var pairs = new List<AlbumDuplicatePair>();
 
         foreach (var artistGroup in albums.GroupBy(a => a.ArtistKey, StringComparer.Ordinal))

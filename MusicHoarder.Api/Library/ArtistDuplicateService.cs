@@ -71,11 +71,43 @@ public sealed class ArtistDuplicateService(
     private const string MergeChangeSource = "artist-merge";
     private const string SplitChangeSource = "artist-credit-split";
 
+    /// <summary>
+    /// Every song column <see cref="Detect"/> reads: the three places a row names an artist and the
+    /// MusicBrainz ids that travel with them. Nothing else is loaded for detection — so a property
+    /// read there (or in a helper it shares with merge and split, which load whole rows) that is
+    /// not in this list is always blank.
+    /// </summary>
+    internal static readonly SongColumnSet DetectColumns = new(
+        nameof(SongMetadata.Artist),
+        nameof(SongMetadata.AlbumArtist),
+        nameof(SongMetadata.Artists),
+        nameof(SongMetadata.ArtistMusicBrainzIds),
+        nameof(SongMetadata.AlbumArtistMusicBrainzId));
+
     public async Task<ArtistDuplicateReport> DetectAsync(Guid ownerUserId, CancellationToken ct = default)
     {
-        var songs = await QueryEligible(ownerUserId).WithoutHeavyText(db).ToListAsync(ct);
+        var songs = await QueryEligible(ownerUserId).WithOnly(db, DetectColumns).ToListAsync(ct);
         var dismissed = await LoadDismissedPairsAsync(ownerUserId, ct);
 
+        return Detect(
+            songs,
+            dismissed,
+            options.Value.ArtistMergeFuzzyThreshold,
+            options.Value.ArtistMergeIdentityFuzzyThreshold,
+            options.Value.DuplicateMaxBlockSize);
+    }
+
+    /// <summary>
+    /// The detection itself, over one owner's songs already loaded. Static so that the rows, the
+    /// dismissed pairs and the three settings are all it can see.
+    /// </summary>
+    internal static ArtistDuplicateReport Detect(
+        IReadOnlyList<SongMetadata> songs,
+        HashSet<(string Low, string High)> dismissed,
+        double threshold,
+        double identityFloor,
+        int maxIdBlock)
+    {
         var stats = CollectNameStats(songs);
         var credits = CreditEvidence.Build(songs, stats.Keys);
 
@@ -100,9 +132,6 @@ public sealed class ArtistDuplicateService(
             var pair = string.CompareOrdinal(ka, kb) <= 0 ? (ka, kb) : (kb, ka);
             return dismissed.Contains(pair);
         }
-
-        var threshold = options.Value.ArtistMergeFuzzyThreshold;
-        var identityFloor = options.Value.ArtistMergeIdentityFuzzyThreshold;
 
         // The single edge test. Evidence is always PAIRWISE: a shared MusicBrainz id corroborates a
         // spelling that already looks alike, it never stands on its own. Names routinely carry ids
@@ -143,7 +172,6 @@ public sealed class ArtistDuplicateService(
         // One id shared by more names than this is noise, not identity (a placeholder that slipped
         // the filter, a provider stamping the release artist onto every credit) — expanding it
         // pairwise only manufactures candidates.
-        var maxIdBlock = options.Value.DuplicateMaxBlockSize;
         var candidateBlocks = names.GroupBy(n => keyOf[n]).Where(g => g.Key.Length > 0).Select(g => g.ToList())
             .Concat(byMbid.Values.Where(g => g.Count > 1 && g.Count <= maxIdBlock))
             .Concat(names.Where(n => keyOf[n].Length >= 4).GroupBy(n => BucketOf(keyOf[n])).Select(g => g.ToList()));

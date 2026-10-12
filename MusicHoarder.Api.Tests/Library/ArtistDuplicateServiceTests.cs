@@ -5,6 +5,7 @@ using MusicHoarder.Api.Library;
 using MusicHoarder.Api.Metadata;
 using MusicHoarder.Api.Options;
 using MusicHoarder.Api.Persistence;
+using MusicHoarder.Api.Tests.Persistence;
 
 namespace MusicHoarder.Api.Tests.Library;
 
@@ -360,6 +361,55 @@ public class ArtistDuplicateServiceTests
         var report = await Service(db).DetectAsync(Owner);
 
         Assert.Empty(report.Clusters);
+    }
+
+    // DetectAsync loads DetectColumns and nothing else. Every other column of every row here holds
+    // a value, so the day Detect (or a helper it shares with merge and split) starts reading one,
+    // it sees that value over whole rows and a blank through DetectAsync, and the two reports part.
+    [Fact]
+    public async Task Detect_ReadsOnlyTheColumnsItLoads()
+    {
+        await using var db = NewContext();
+        SongMetadata[] library =
+        [
+            // Track credits without a discrete list: spellings of one name.
+            Song("/a/1.mp3", artist: "JAY-Z"),
+            Song("/a/2.mp3", artist: "JAY-Z"),
+            Song("/a/3.mp3", artist: "JAYZ"),
+            // Discrete lists, tied together by the ids that travel with them.
+            Song("/b/1.mp3", artist: "Lauryn Hill", artists: "Lauryn Hill", artistMbids: "mbid-lauryn"),
+            Song("/b/2.mp3", artist: "Ms. Lauryn Hill", artists: "Ms. Lauryn Hill", artistMbids: "mbid-lauryn"),
+            // A name that exists only as an album artist, with an id only the album artist carries.
+            Song("/c/1.mp3", artist: "Common", artists: "Common", albumArtist: "Erykah Badu", albumArtistMbid: "mbid-badu"),
+            Song("/c/2.mp3", artist: "Common", artists: "Common", albumArtist: "Erykah Badú"),
+            // A collab album artist over its own discrete list: a combined credit.
+            .. HefShape(),
+        ];
+        string[] eligibility = [nameof(SongMetadata.OwnerUserId), nameof(SongMetadata.DeletedAtUtc), nameof(SongMetadata.IsSynthetic)];
+        for (var i = 0; i < library.Length; i++)
+            library[i].FillExcept(db, seed: i, ArtistDuplicateService.DetectColumns.Names, eligibility);
+        db.Songs.AddRange(library);
+        await db.SaveChangesAsync();
+        var options = new MusicEnricherOptions();
+        ArtistDuplicateReport Detect(IReadOnlyList<SongMetadata> rows) => ArtistDuplicateService.Detect(
+            rows, [], options.ArtistMergeFuzzyThreshold, options.ArtistMergeIdentityFuzzyThreshold, options.DuplicateMaxBlockSize);
+
+        var overWholeRows = Detect(await db.Songs.AsNoTracking().ToListAsync());
+        var loaded = await Service(db).DetectAsync(Owner);
+
+        Assert.Equal(3, overWholeRows.Clusters.Count);
+        Assert.Single(overWholeRows.CombinedCredits);
+        Assert.Equal(Json(overWholeRows), Json(loaded));
+
+        // And the list is not padded: leave any one of them out and the report changes.
+        foreach (var column in ArtistDuplicateService.DetectColumns.Names)
+        {
+            var without = new SongColumnSet([.. ArtistDuplicateService.DetectColumns.Names.Where(n => n != column)]);
+            Assert.NotEqual(Json(overWholeRows), Json(Detect(await db.Songs.WithOnly(db, without).ToListAsync())));
+        }
+
+        // The report holds lists, which records compare by reference.
+        static string Json(ArtistDuplicateReport report) => System.Text.Json.JsonSerializer.Serialize(report);
     }
 
     // --- Merge ---
