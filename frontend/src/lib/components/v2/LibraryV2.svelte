@@ -47,6 +47,7 @@
     SORT_LABELS,
     SORT_MENU_LABELS,
     titleOf,
+    warmSearchCache,
     type ChipKey,
     type SortKey
   } from '$lib/track-list-view.svelte';
@@ -580,7 +581,15 @@
 <!-- ── shared nav-bar pieces ─────────────────────────────────────────────── -->
 
 {#snippet searchField()}
-  <SearchField bind:value={query} label={SEARCH_LABEL[tab]} />
+  <!-- Tracks only: warm the search cache before typing starts, so the first keystroke only has
+       to assemble already-folded rows instead of folding all of them inside it (the Albums and
+       Artists grids are a few hundred rows, not thousands, so they cost nothing either way). -->
+  <SearchField
+    bind:value={query}
+    label={SEARCH_LABEL[tab]}
+    onfocus={tab === 'tracks' ? () => warmSearchCache(trackListBase) : undefined}
+    onpointerdown={tab === 'tracks' ? () => warmSearchCache(trackListBase) : undefined}
+  />
 {/snippet}
 
 {#snippet menuTrigger(label: string, glyph: 'sort' | 'filter')}
