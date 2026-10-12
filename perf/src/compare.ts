@@ -12,12 +12,12 @@ interface Row {
   verdict: string
 }
 
-/** Faster or slower only beyond 10% and beyond the noise both samples carry. */
+/** Faster or slower only beyond 10%, beyond the noise both samples carry, and beyond 5 ms. */
 function judge(before: Summary, after: Summary): { change: string; verdict: string } {
   if (Number.isNaN(before.median) || Number.isNaN(after.median)) return { change: '–', verdict: '' }
   const delta = after.median - before.median
   const relative = before.median === 0 ? 0 : delta / before.median
-  const noise = Math.max(before.median - before.min, after.median - after.min, 2)
+  const noise = Math.max(before.median - before.min, after.median - after.min, 5)
   const change = `${delta >= 0 ? '+' : '−'}${formatMs(Math.abs(delta))} (${relative >= 0 ? '+' : '−'}${Math.abs(relative * 100).toFixed(0)}%)`
   if (Math.abs(relative) < 0.1 || Math.abs(delta) <= noise) return { change, verdict: 'same' }
   return { change, verdict: delta < 0 ? 'faster' : 'SLOWER' }
