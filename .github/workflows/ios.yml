@@ -1,0 +1,62 @@
+# Builds the iOS shell (a Capacitor web view plus the native audio plugin) for the simulator.
+# This is the only place its Swift is compiled outside a developer's Mac: nothing here signs,
+# archives or uploads, so it needs no Apple account and no secrets.
+#
+# Path-filtered like android.yml, and for the same reason not one of main's required status
+# checks: a skipped run must not leave a PR waiting on a check that will never report.
+name: iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # Writes the generated, untracked parts of the Xcode project (the bundled page, the
+      # Capacitor config, the plugin list). The address is a placeholder: nothing is loaded.
+      - name: Sync
+        run: bun run sync
+        env:
+          MH_SERVER_URL: https://music.example.com
+
+      - name: Build for the simulator
+        run: |
+          xcodebuild build \
+            -project xcode/App/App.xcodeproj \
+            -scheme App \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO

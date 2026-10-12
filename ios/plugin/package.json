@@ -1,0 +1,19 @@
+{
+  "name": "musichoarder-native-audio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MusicHoarder's native iOS audio engine: an AVQueuePlayer the web player drives.",
+  "license": "MIT",
+  "files": [
+    "ios/Sources",
+    "Package.swift"
+  ],
+  "capacitor": {
+    "ios": {
+      "src": "ios"
+    }
+  },
+  "peerDependencies": {
+    "@capacitor/core": ">=8.0.0"
+  }
+}
