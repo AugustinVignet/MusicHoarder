@@ -81,8 +81,11 @@ export function findings(run: RunResult): string[] {
   }
   for (const [path, r] of repeated)
     out.push(`\`${path}\` is fetched ${r.count} times while a page opens (${formatBytes(r.bytes)} in total): ${r.where.slice(0, 3).join(', ')}${r.where.length > 3 ? '…' : ''}.`)
+  // What matters is what reaches the browser: when the frontend proxy compresses, an API that
+  // sends plain JSON to it over loopback is fine.
+  const proxyCompresses = (run.api?.endpoints ?? []).some((e) => e.proxy?.contentEncoding)
   const uncompressed = (run.api?.endpoints ?? []).filter((e) => !e.contentEncoding && e.gzipBytes != null && e.decodedBytes > 50_000)
-  if (uncompressed.length)
+  if (uncompressed.length && !proxyCompresses)
     out.push(
       `${uncompressed.length} JSON responses over 50 kB leave the server uncompressed (${uncompressed.map((e) => e.name).slice(0, 4).join(', ')}…). ` +
         'Unless a proxy in front compresses them, that is the size on the wire.',
@@ -112,8 +115,12 @@ function apiMarkdown(api: ApiReport): string {
   }
   const proxied = api.endpoints.filter((e) => e.proxy)
   if (proxied.length) {
-    lines.push('### Through the frontend proxy', '', '| Request | Direct | Via /api/mh | Added |', '|---|--:|--:|--:|')
-    for (const e of proxied) lines.push(`| ${e.name} | ${formatMs(e.total.median)} | ${formatMs(e.proxy!.total.median)} | ${formatMs(e.proxy!.total.median - e.total.median)} |`)
+    lines.push('### Through the frontend proxy', '', '| Request | Direct | Via /api/mh | Added | Sent to the browser |', '|---|--:|--:|--:|--:|')
+    for (const e of proxied)
+      lines.push(
+        `| ${e.name} | ${formatMs(e.total.median)} | ${formatMs(e.proxy!.total.median)} | ${formatMs(e.proxy!.total.median - e.total.median)} | ` +
+          `${e.proxy!.wireBytes != null ? `${formatBytes(e.proxy!.wireBytes)}${e.proxy!.contentEncoding ? ` (${e.proxy!.contentEncoding})` : ''}` : '–'} |`,
+      )
     lines.push('')
   }
   return lines.join('\n')
@@ -200,7 +207,7 @@ function endpointRow(e: EndpointResult, max: number): string {
   if (e.load)
     detail.push(`<p>With ${e.load.concurrency} callers at once: ${e.load.requestsPerSecond.toFixed(0)} requests/s, median ${formatMs(e.load.total.median)}, p95 ${formatMs(e.load.total.p95)}${e.load.errors ? `, ${e.load.errors} errors` : ''}.</p>`)
   if (e.proxy)
-    detail.push(`<p>Through the frontend proxy: median ${formatMs(e.proxy.total.median)} (${formatMs(e.proxy.total.median - e.total.median)} added), headers after ${formatMs(e.proxy.ttfb.median)}.</p>`)
+    detail.push(`<p>Through the frontend proxy: median ${formatMs(e.proxy.total.median)} (${formatMs(e.proxy.total.median - e.total.median)} added), headers after ${formatMs(e.proxy.ttfb.median)}${e.proxy.wireBytes != null ? `, ${formatBytes(e.proxy.wireBytes)} sent${e.proxy.contentEncoding ? ` as ${e.proxy.contentEncoding}` : ' uncompressed'}` : ''}.</p>`)
   if (e.overBudget.length) detail.push(`<p class="overtext">${esc(e.overBudget.join('; '))}</p>`)
 
   return `<tr>

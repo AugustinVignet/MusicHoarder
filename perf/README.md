@@ -20,7 +20,8 @@ row for its detail) and `result.json` (what `compare` reads).
 
 ## What you need
 
-Docker, the .NET SDK, Bun and `ffmpeg` (all already needed to work on the project), plus a
+Docker, the .NET SDK, Bun, Node 22.18 or newer and `ffmpeg` (all already needed to work on the
+project; the browser scenarios run under Node because Playwright is not reliable under Bun), plus a
 Chromium for the browser part: `bunx playwright install chromium`, or point `PERF_CHROMIUM` at any
 Chrome or Chromium binary.
 
@@ -77,8 +78,8 @@ bun perf web --only "open tracks" --profiles phone --runs 5 --label try-1
 ```
 
 When a browser number is high and the API calls behind it are not, the time is going into
-JavaScript. `--cpu-profile` saves `interactions-<profile>.cpuprofile` next to the report; load it
-in Chrome DevTools (Performance → Load profile) to see which functions it went to. Profiling slows
+JavaScript. `--cpu-profile` saves one profile per interaction next to the report (`phone-search.cpuprofile`,
+`desktop-play.cpuprofile`, …); load one in Chrome DevTools (Performance → Load profile) to see which functions it went to. Profiling slows
 the page, so leave it off for runs you intend to compare.
 
 `up` rebuilds the API and the frontend, so the stack always runs the code in your checkout;

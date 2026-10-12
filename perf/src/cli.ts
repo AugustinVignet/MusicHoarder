@@ -2,14 +2,14 @@
 // Entry point of the performance suite. `bun perf help` lists the commands; perf/README.md
 // explains what each number means.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { runApiBench, type ApiReport } from './api/bench.ts'
 import { compare } from './compare.ts'
 import { PERF_ROOT, SIZES, stackConfig, type SizeName, type Target } from './config.ts'
 import { renderHtml, renderMarkdown, type RunResult } from './report.ts'
 import { down, target as localTarget, up } from './stack.ts'
-import { PROFILES, runWebBench, type WebReport } from './web/bench.ts'
+import { PROFILES, type WebBenchOptions, type WebReport } from './web/bench.ts'
 
 const HELP = `MusicHoarder performance suite
 
@@ -33,7 +33,7 @@ Options
   --only <text>                    only endpoints / scenarios whose name contains this
   --profiles <a,b>                 browser profiles: ${Object.keys(PROFILES).join(', ')} (default desktop,phone)
   --runs <n>                       repeats of each browser scenario (default 3)
-  --cpu-profile                    also save a CPU profile of the interactions (open it in Chrome DevTools)
+  --cpu-profile                    also save a CPU profile per interaction (open one in Chrome DevTools)
   --strict                         exit 1 when anything is over its budget
 
 Any instance, read-only (GET requests only)
@@ -59,6 +59,25 @@ function git(args: string[]): string {
 }
 
 const resultsRoot = join(PERF_ROOT, 'results')
+
+/**
+ * The browser scenarios run in a Node child process: Playwright drives Chromium over pipes, which
+ * Bun does not keep open reliably. Node runs the same TypeScript as it is (22.18 or newer).
+ */
+function runWebInNode(dir: string, target: Target, options: WebBenchOptions): WebReport {
+  const job = join(dir, 'web-job.json')
+  const out = join(dir, 'web-report.json')
+  // The job holds the session cookie, so it is removed again whatever happens.
+  writeFileSync(job, JSON.stringify({ target, options, out }), { mode: 0o600 })
+  try {
+    const result = Bun.spawnSync(['node', join(PERF_ROOT, 'src/web/run.ts'), job], { stdio: ['ignore', 'inherit', 'inherit'] })
+    if (!result.success) throw new Error('The browser scenarios failed (see above). They need Node 22.18 or newer on PATH.')
+    return JSON.parse(readFileSync(out, 'utf8')) as WebReport
+  } finally {
+    rmSync(job, { force: true })
+    rmSync(out, { force: true })
+  }
+}
 
 function resolveRun(name: string): string {
   if (existsSync(join(name, 'result.json'))) return resolve(name)
@@ -115,12 +134,12 @@ async function main() {
       })) satisfies ApiReport
     }
     if (parts.web) {
-      run.web = (await runWebBench(target, {
+      run.web = runWebInNode(dir, target, {
         profiles: (flags.get('profiles') ?? 'desktop,phone').split(','),
         runs: Number(flags.get('runs') ?? 3),
         filter: flags.get('only') ?? null,
         cpuProfileDir: flags.has('cpu-profile') ? dir : null,
-      })) satisfies WebReport
+      })
     }
 
     writeFileSync(join(dir, 'result.json'), JSON.stringify(run, null, 2))

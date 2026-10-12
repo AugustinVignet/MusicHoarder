@@ -40,7 +40,8 @@ export interface EndpointResult {
   cpuMsPerRequest: number | null
   db: { queriesPerRequest: number; msPerRequest: number; top: Statement[] } | null
   load: { concurrency: number; requestsPerSecond: number; total: Summary; errors: number } | null
-  proxy: { ttfb: Summary; total: Summary } | null
+  /** The same request through the frontend proxy: its timing, and what the browser is sent. */
+  proxy: { ttfb: Summary; total: Summary; wireBytes: number; contentEncoding: string | null } | null
   budget: { p95Ms?: number; gzipBytes?: number }
   overBudget: string[]
 }
@@ -316,7 +317,8 @@ async function measure(endpoint: Endpoint, sample: Sample, target: Target, optio
 
   if (endpoint.viaProxy && target.proxyBase) {
     const proxied = await repeat(`${target.proxyBase}${path}`, headers, Math.max(3, Math.ceil(options.iterations / 2)), options.timeBudgetMs)
-    result.proxy = { ttfb: summarize(proxied.ttfb), total: summarize(proxied.total) }
+    const sent = await timed(`${target.proxyBase}${path}`, headers, false)
+    result.proxy = { ttfb: summarize(proxied.ttfb), total: summarize(proxied.total), wireBytes: sent.bytes, contentEncoding: sent.headers.get('content-encoding') }
   }
 
   if (result.budget.p95Ms != null && result.total.p95 > result.budget.p95Ms)

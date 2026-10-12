@@ -1,3 +1,6 @@
+// Runs under Node, not Bun (see run.ts): Playwright talks to the browser over pipes, and under Bun
+// that pipe is sometimes closed mid-run, which leaves the next call waiting forever.
+//
 // Drives the built web app in headless Chromium and times what a listener waits for: a page
 // becoming usable from a cold start, moving between pages, a search keystroke, a scroll, and the
 // gap between pressing play and hearing sound.
@@ -81,7 +84,7 @@ export interface WebBenchOptions {
   profiles: string[]
   runs: number
   filter: string | null
-  /** Folder for a CPU profile of each profile's interaction sequence, or null for none. */
+  /** Folder for one CPU profile per interaction and browser profile, or null for none. */
   cpuProfileDir: string | null
 }
 
@@ -353,7 +356,7 @@ const followLink = (path: string, ready: string) => `(() => {
 })()`
 
 /** Runs the steps in order; a step that fails ends the sequence but keeps what was measured before it. */
-async function measureInteractions(browser: Browser, profile: Profile, target: Target, cpuProfilePath: string | null): Promise<{ steps: Interactions; failure?: string }> {
+async function measureInteractions(browser: Browser, profile: Profile, target: Target, cpuProfilePrefix: string | null): Promise<{ steps: Interactions; failure?: string }> {
   const { context, page, cdp } = await openSession(browser, profile, target, TRACKS_READY)
   const out: Interactions = {}
   try {
@@ -361,9 +364,16 @@ async function measureInteractions(browser: Browser, profile: Profile, target: T
     await seen(page, 180_000)
     await settle(page)
 
-    if (cpuProfilePath) {
+    if (cpuProfilePrefix) {
       await cdp.send('Profiler.enable')
       await cdp.send('Profiler.setSamplingInterval', { interval: 500 })
+      await cdp.send('Profiler.start')
+    }
+    /** Ends the profile of the step just measured, as its own file, and starts the next one. */
+    const endProfile = async (step: string) => {
+      if (!cpuProfilePrefix) return
+      const { profile: cpuProfile } = await cdp.send('Profiler.stop')
+      writeFileSync(`${cpuProfilePrefix}-${step}.cpuprofile`, JSON.stringify(cpuProfile))
       await cdp.send('Profiler.start')
     }
     /** Main-thread time in long tasks since `from`: what kept the page from answering. */
@@ -380,13 +390,16 @@ async function measureInteractions(browser: Browser, profile: Profile, target: T
       await settle(page, 8000)
     }
     await navigate('Tracks → Albums', followLink('/library', has(ALBUM_CARD)))
+    await endProfile('tracks-to-albums')
     await navigate('Open an album', `(() => {
       window.__perf.watch(${JSON.stringify(has(TRACK_ROW))})
       const started = performance.now()
       document.querySelector(${JSON.stringify(ALBUM_CARD)}).click()
       return started
     })()`)
+    await endProfile('open-album')
     await navigate('Albums → Tracks', followLink('/tracks', TRACKS_READY))
+    await endProfile('albums-to-tracks')
 
     // Real key events, so the browser's own Event Timing measures input-to-next-frame.
     await page.evaluate(() => { (window as unknown as { __perf: { events: unknown[]; longTasks: unknown[] } }).__perf.events.length = 0 })
@@ -399,6 +412,7 @@ async function measureInteractions(browser: Browser, profile: Profile, target: T
       value: durations.length ? Math.max(...durations) : 16,
       metrics: { 'Typical keystroke': durations.length ? median(durations) : 16 },
     }
+    await endProfile('search')
     await page.fill('input[aria-label="Search tracks"]', '')
     await page.waitForTimeout(400)
 
@@ -424,6 +438,7 @@ async function measureInteractions(browser: Browser, profile: Profile, target: T
       element.scrollTop = 0
       return deltas.slice(1)
     }, TRACK_ROW)) as number[]
+    await endProfile('scroll')
     out['Scroll the track list (95th percentile frame)'] = {
       value: percentile(frames, 95),
       metrics: {
@@ -484,10 +499,7 @@ async function measureInteractions(browser: Browser, profile: Profile, target: T
       },
       api: audio.calls,
     }
-    if (cpuProfilePath) {
-      const { profile: cpuProfile } = await cdp.send('Profiler.stop')
-      writeFileSync(cpuProfilePath, JSON.stringify(cpuProfile))
-    }
+    await endProfile('play')
     return { steps: out }
   } catch (error) {
     return { steps: out, failure: (error as Error).message.split('\n')[0] }
@@ -554,8 +566,8 @@ export async function runWebBench(target: Target, options: WebBenchOptions): Pro
         let failure: string | undefined
         for (let i = 0; i < options.runs; i++) {
           // Profiling slows the page down, so only the first run carries it.
-          const cpuProfilePath = i === 0 && options.cpuProfileDir ? join(options.cpuProfileDir, `interactions-${profileName}.cpuprofile`) : null
-          const run = await measureInteractions(browser, profile, target, cpuProfilePath)
+          const cpuProfilePrefix = i === 0 && options.cpuProfileDir ? join(options.cpuProfileDir, `${profileName}`) : null
+          const run = await measureInteractions(browser, profile, target, cpuProfilePrefix)
           runs.push(run.steps)
           failure ??= run.failure
         }
