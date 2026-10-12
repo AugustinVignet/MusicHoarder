@@ -47,8 +47,9 @@
 
   const builtSongs = $derived(songsStore.builtSongs);
   // The library grid's own cards, so a folder-split album isn't two near-identical shelf tiles.
-  // Their `songs` are the store's rows, which is what lets the shelves below read per-track play
-  // counts and likes and still see an optimistic heart tap.
+  // Their `songs` are the store's rows, which is what lets the shelves below read per-track likes
+  // and still see an optimistic heart tap. Play counts and last plays are read through
+  // `songsStore.playStatsOf`, which knows the plays counted since those rows were fetched.
   const allAlbums = $derived(songsStore.albums);
   const artistGroups = $derived(songsStore.leadArtistGroups);
   // The Tracks list's own base, so the Library rows count exactly what they open.
@@ -85,25 +86,29 @@
   function albumLastPlayed(a: AlbumSummary): number {
     let max = 0;
     for (const s of a.songs) {
-      const t = s.lastPlayedAtUtc ? Date.parse(s.lastPlayedAtUtc) : 0;
+      const at = songsStore.playStatsOf(s).lastPlayedAtUtc;
+      const t = at ? Date.parse(at) : 0;
       if (t > max) max = t;
     }
     return max;
   }
+  function neverPlayed(a: AlbumSummary): boolean {
+    return a.songs.every((s) => !songsStore.playStatsOf(s).playCount);
+  }
+  // Each album's last play is worked out once, not once per comparison of the sort.
   const lastPlayedAlbums = $derived(
     allAlbums
-      .filter((a) => albumLastPlayed(a) > 0)
-      .sort((a, b) => albumLastPlayed(b) - albumLastPlayed(a))
+      .map((album) => ({ album, at: albumLastPlayed(album) }))
+      .filter((played) => played.at > 0)
+      .sort((a, b) => b.at - a.at)
       .slice(0, SHELF_SIZE)
+      .map((played) => played.album)
   );
 
   // Discover: albums you've never pressed play on — a random rummage through the
   // unlistened corners of the hoard.
   const discoverAlbums = $derived(
-    seededOrder(
-      allAlbums.filter((a) => a.songs.every((s) => !s.playCount)),
-      (a) => a.key
-    ).slice(0, SHELF_SIZE)
+    seededOrder(allAlbums.filter(neverPlayed), (a) => a.key).slice(0, SHELF_SIZE)
   );
 
   // New to you: albums that album completion filled in and you haven't played yet. This is the
@@ -113,7 +118,7 @@
       allAlbums.filter(
         (a) =>
           a.songs.some((s) => s.acquisitionIntent === 'AlbumFill' && !s.likedAtUtc) &&
-          a.songs.every((s) => !s.playCount)
+          neverPlayed(a)
       ),
       (a) => a.key
     ).slice(0, SHELF_SIZE)

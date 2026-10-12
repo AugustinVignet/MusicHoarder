@@ -198,10 +198,14 @@
 
   const recentlyPlayed = $derived.by(() => {
     if (hasQuery) return [];
+    // Through the store, not off the row: a play counted since the rows were fetched is not there.
+    // Read once per song, so the sort compares strings it already holds.
     return builtSongs
-      .filter((s) => s.lastPlayedAtUtc)
-      .sort((a, b) => (b.lastPlayedAtUtc ?? '').localeCompare(a.lastPlayedAtUtc ?? ''))
-      .slice(0, MAX_RECENT);
+      .map((song) => ({ song, at: songsStore.playStatsOf(song).lastPlayedAtUtc ?? '' }))
+      .filter((played) => played.at)
+      .sort((a, b) => b.at.localeCompare(a.at))
+      .slice(0, MAX_RECENT)
+      .map((played) => played.song);
   });
 
   const goTo = $derived.by<{ label: string; href: string; icon: LucideIcon }[]>(() => {

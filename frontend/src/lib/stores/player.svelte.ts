@@ -879,6 +879,10 @@ function dropPendingLoad() {
  * Fire-and-forget play reporting (feeds the overview's last-played / discover
  * shelves). Failures are expected for demo sessions (write-blocked) and
  * anonymous share playback — never let them disturb playback.
+ *
+ * It runs right after `play()`, in the task the browser has to get out of before it asks for the
+ * audio, so nothing here may make the library re-derive: `notePlayed` only writes the play down,
+ * and the songs store shows it once the track is under way.
  */
 function reportPlay(songId: number) {
   songsStore.notePlayed(songId);

@@ -9,6 +9,7 @@
  * the detail panel is still open elsewhere.
  */
 
+import { untrack } from 'svelte';
 import {
   buildArtistGroups,
   currentGrantors,
@@ -38,7 +39,7 @@ import { isTrackListSong } from '$lib/track-list-view.svelte';
 let songs = $state.raw<ApiSong[]>([]);
 /**
  * The album cards the server grouped, still as it sent them. Kept apart from {@link albums} so a
- * heart tap or a play can re-join against the mutated song rows without another request.
+ * heart tap can re-join against the changed song rows without another request.
  */
 let albumDtos = $state.raw<AlbumSummaryDto[]>([]);
 /** Cards for the song-detail panel: every song, per folder, unmerged. Loaded on first use. */
@@ -76,6 +77,28 @@ let detailAlbumsEtag: string | null = null;
  * forever — the "shared by X" header would simply never appear on a cold load.
  */
 let grantors = $state<Grantor[]>([]);
+
+/** What a play changes about a song. */
+export type PlayStats = Pick<ApiSong, 'playCount' | 'lastPlayedAtUtc'>;
+/**
+ * Plays counted here since the rows were fetched, by song id; read through {@link playStatsOf}.
+ * They are kept beside the rows rather than patched into them, because a patch replaces
+ * {@link songs}, and everything derived from the list then re-derives: the built and Tracks cuts,
+ * the artist groups, every mounted list's sort. That was a tenth of a second on a phone with
+ * 10,000 songs, at every track start, for two fields that only the Overview's shelves and the
+ * palette's "recently played" read. `$state.raw`, and replaced like the rows.
+ */
+let playStats = $state.raw<ReadonlyMap<number, PlayStats>>(new Map());
+/**
+ * Plays noted and not shown yet. The player notes a play right after `play()`, and whatever that
+ * changed would re-derive in the same task, ahead of the browser asking for the audio. So a play
+ * is only written down there, and the views that show it catch up once the song is under way.
+ */
+let pendingPlays: { id: number; at: string }[] = [];
+let playsTimer: ReturnType<typeof setTimeout> | null = null;
+/** How long after a track starts its play is shown: long enough for the sound to have started. */
+const PLAY_SHOWN_AFTER_MS = 1000;
+
 let isLoading = $state(false);
 let error = $state<string | null>(null);
 let hasLoaded = false;
@@ -127,6 +150,7 @@ async function loadSongs(opts?: { silent?: boolean }): Promise<void> {
     if (!loaded.notModified) {
       songs = loaded.data;
       songsEtag = loaded.etag;
+      forgetPlays(); // the server's counts are the truth again
       // Read AFTER the await: the fetch populates the api-client's copy as it resolves.
       grantors = currentGrantors();
     }
@@ -321,11 +345,58 @@ async function refreshAlbums(): Promise<void> {
   }
 }
 
-/** Reflect a play reported by the player without waiting for the next full refetch. */
+/**
+ * Reflect a play reported by the player without waiting for the next full refetch. Called as a
+ * track starts, so it does no more there than write the play down (see {@link pendingPlays}).
+ */
 function notePlayed(id: number): void {
-  const song = findSong(id);
-  if (!song) return;
-  patchSong(id, { playCount: (song.playCount ?? 0) + 1, lastPlayedAtUtc: new Date().toISOString() });
+  // A track that is not a row here (one streamed through a share link) has no count to show, and
+  // the rows stay exactly what the server sent: there is nothing to write down, and nothing that
+  // should cost them their validator and the next refresh a download of the whole list. Looked
+  // up untracked: this runs in whatever started the track, and must not tie it to the song list.
+  if (!untrack(() => findSong(id))) return;
+  pendingPlays.push({ id, at: new Date().toISOString() });
+  playsTimer ??= setTimeout(showPlays, PLAY_SHOWN_AFTER_MS);
+  // What is shown is about to differ from what the server sent, so its validator must not vouch
+  // for it: the next load asks for the list itself and brings the server's own count back. That
+  // is the only count there is when the report of this play was refused (the demo account) or
+  // never arrived, and "unchanged" would leave this one standing.
+  songsEtag = null;
+}
+
+/** Count the plays noted since the last time, in one change. */
+function showPlays(): void {
+  playsTimer = null;
+  const plays = pendingPlays;
+  pendingPlays = [];
+  const next = new Map(playStats);
+  let counted = false;
+  for (const { id, at } of plays) {
+    const song = findSong(id);
+    if (!song) continue; // not a row of this library (a share link's track): nothing shows it
+    const before = next.get(id) ?? song;
+    next.set(id, { playCount: (before.playCount ?? 0) + 1, lastPlayedAtUtc: at });
+    counted = true;
+  }
+  if (counted) playStats = next;
+}
+
+/** Drop the plays counted here: the rows they were counted on top of are gone. */
+function forgetPlays(): void {
+  if (playsTimer) {
+    clearTimeout(playsTimer);
+    playsTimer = null;
+  }
+  pendingPlays = [];
+  if (playStats.size > 0) playStats = new Map();
+}
+
+/**
+ * A song's play count and last play, including the plays counted here since its row was fetched.
+ * The row's own two fields are the server's and go stale at the first play, so read these instead.
+ */
+function playStatsOf(song: Pick<ApiSong, 'id' | 'playCount' | 'lastPlayedAtUtc'>): PlayStats {
+  return playStats.get(song.id) ?? song;
 }
 
 /**
@@ -336,6 +407,7 @@ function notePlayed(id: number): void {
  */
 function reset(): void {
   songs = [];
+  forgetPlays();
   lastBuilt = -1;
   albumDtos = [];
   detailAlbumDtos = [];
@@ -421,7 +493,8 @@ export const songsStore = {
   },
   /**
    * The store's rows by id — the objects themselves, so anything joining against them keeps seeing
-   * the optimistic like/play overlays. Use with {@link hydrateAlbums}.
+   * an optimistic like. Use with {@link hydrateAlbums}. A play is not on the row: see
+   * {@link playStatsOf}.
    */
   get songsById() {
     return songsById;
@@ -499,5 +572,6 @@ export const songsStore = {
   stopLive,
   toggleLike,
   notePlayed,
+  playStatsOf,
   reset
 };

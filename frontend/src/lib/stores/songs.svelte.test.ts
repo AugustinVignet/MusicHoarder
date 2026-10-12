@@ -147,6 +147,135 @@ describe('shared cuts', () => {
   });
 });
 
+describe('a play', () => {
+  // The player notes a play right after `play()`. Whatever that changes re-derives in the same
+  // task, before the browser asks for the audio — and a change to the rows re-derives the whole
+  // library. So the rows stay as they are, and the play shows a moment later, beside them.
+  const NOW = new Date('2026-09-24T10:00:00.000Z');
+  const row = (id: number, extra: Record<string, unknown> = {}) => ({
+    id,
+    fileName: `${id}.mp3`,
+    sourcePath: `/src/${id}.mp3`,
+    fileSizeBytes: 1,
+    title: `Song ${id}`,
+    album: 'Album',
+    artist: 'Nina',
+    isBuilt: true,
+    ...extra
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    fetchAlbums.mockResolvedValue([]);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  async function loaded(rows: unknown[]) {
+    fetchSongs.mockResolvedValue(rows);
+    const store = await freshStore();
+    await store.loadSongs();
+    return store;
+  }
+
+  it('is counted beside the rows: the library itself is not replaced, so nothing made from it is made again', async () => {
+    const store = await loaded([row(1, { playCount: 4 }), row(2)]);
+    const rows = store.songs;
+
+    store.notePlayed(1);
+    vi.advanceTimersByTime(1000);
+
+    expect(store.playStatsOf(rows[0])).toEqual({
+      playCount: 5,
+      lastPlayedAtUtc: NOW.toISOString()
+    });
+    // The same array of the same rows: every cut, group and sorted list derived from it stands.
+    expect(store.songs).toBe(rows);
+    expect(store.songs[0]).toBe(rows[0]);
+    expect(rows[0].playCount).toBe(4);
+  });
+
+  it('shows once the track is under way, not in the task that started it', async () => {
+    const store = await loaded([
+      row(1),
+      row(2, { playCount: 2, lastPlayedAtUtc: '2026-01-01T00:00:00Z' })
+    ]);
+    const [one, two] = store.songs;
+
+    store.notePlayed(1);
+    expect(store.playStatsOf(one).playCount).toBeUndefined();
+    vi.advanceTimersByTime(999);
+    expect(store.playStatsOf(one).playCount).toBeUndefined();
+
+    // A second later it shows, stamped with when the play happened rather than when it showed.
+    vi.advanceTimersByTime(1);
+    expect(store.playStatsOf(one)).toEqual({ playCount: 1, lastPlayedAtUtc: NOW.toISOString() });
+    // A song nobody played reads as its row says.
+    expect(store.playStatsOf(two)).toMatchObject({
+      playCount: 2,
+      lastPlayedAtUtc: '2026-01-01T00:00:00Z'
+    });
+  });
+
+  it('counts every play, of one song twice and of two songs skipped through', async () => {
+    const store = await loaded([row(1, { playCount: 1 }), row(2)]);
+    store.notePlayed(1);
+    vi.advanceTimersByTime(400);
+    store.notePlayed(2);
+    vi.advanceTimersByTime(600);
+    expect(store.playStatsOf(store.songs[0]).playCount).toBe(2);
+    expect(store.playStatsOf(store.songs[1]).playCount).toBe(1);
+
+    vi.setSystemTime(new Date('2026-09-24T10:05:00.000Z'));
+    store.notePlayed(1);
+    vi.advanceTimersByTime(1000);
+    expect(store.playStatsOf(store.songs[0])).toEqual({
+      playCount: 3,
+      lastPlayedAtUtc: '2026-09-24T10:05:00.000Z'
+    });
+  });
+
+  it('survives a like, which does replace the row', async () => {
+    likeSong.mockResolvedValue({ likedAtUtc: '2026-09-24T10:00:00Z' });
+    const store = await loaded([row(1, { playCount: 4 })]);
+    store.notePlayed(1);
+    vi.advanceTimersByTime(1000);
+    await store.toggleLike(1);
+    expect(store.songs[0].likedAtUtc).toBe('2026-09-24T10:00:00Z');
+    expect(store.playStatsOf(store.songs[0]).playCount).toBe(5);
+  });
+
+  it("gives way to the server's count when the library is fetched again", async () => {
+    const store = await loaded([row(1, { playCount: 4 })]);
+    store.notePlayed(1);
+    vi.advanceTimersByTime(1000);
+    store.notePlayed(1); // still waiting to be shown when the fresh rows land
+
+    fetchSongs.mockResolvedValue([
+      row(1, { playCount: 6, lastPlayedAtUtc: '2026-09-24T10:00:01Z' })
+    ]);
+    await store.loadSongs({ silent: true });
+    vi.advanceTimersByTime(60_000);
+    expect(store.playStatsOf(store.songs[0])).toMatchObject({
+      playCount: 6,
+      lastPlayedAtUtc: '2026-09-24T10:00:01Z'
+    });
+  });
+
+  it('is nothing to show for a song the library does not hold, and is forgotten on sign-out', async () => {
+    const store = await loaded([row(1)]);
+    store.notePlayed(99); // a share link's track
+    vi.advanceTimersByTime(1000);
+    expect(store.playStatsOf({ id: 99 })).toEqual({ id: 99 });
+
+    store.notePlayed(1);
+    store.reset();
+    vi.advanceTimersByTime(60_000);
+    expect(store.playStatsOf(row(1)).playCount).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe('revalidate', () => {
   afterEach(() => vi.useRealTimers());
 
@@ -391,10 +520,9 @@ describe('revalidating against the server', () => {
     expect(store.songs.map((s) => s.id)).toEqual([3]);
   });
 
-  it('drops the songs validator when a row is changed here, so a refresh still overwrites it', async () => {
+  it('drops the songs validator when a play is counted here, so a refresh still overwrites it', async () => {
     const { store } = await loadedStore();
     store.notePlayed(1);
-    expect(store.songs[0].playCount).toBe(1);
 
     // The server never heard of that play (a demo account's report is refused): the next refresh
     // must bring its own count back, which "unchanged" would not.
@@ -403,7 +531,20 @@ describe('revalidating against the server', () => {
     await store.loadSongs({ silent: true });
     expect(fetchSongsIfChanged).toHaveBeenLastCalledWith(null);
     expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({}, 'a1');
-    expect(store.songs[0].playCount).toBe(0);
+    expect(store.playStatsOf(store.songs[0]).playCount).toBe(0);
+  });
+
+  it('keeps the songs validator when the track played is not one of its rows', async () => {
+    const { store, songs } = await loadedStore();
+    // A track streamed through a share link (one sent in a chat): no row here counts its plays,
+    // so the rows are still exactly what the server sent and a refresh may be told "unchanged".
+    store.notePlayed(99);
+
+    fetchSongsIfChanged.mockResolvedValueOnce(unchanged('s1'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('a1'));
+    await store.loadSongs({ silent: true });
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith('s1');
+    expect(store.songs).toBe(songs);
   });
 
   it('asks again when a like landed while "unchanged" was on its way', async () => {
