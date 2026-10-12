@@ -257,6 +257,14 @@ public static class SongsEndpoints
     /// empty for them by construction, and an admin with no grants runs exactly the code path that
     /// shipped before this endpoint was unified.
     /// </para>
+    ///
+    /// <para>
+    /// This is the response every client downloads whole, so it carries only what a list or a
+    /// player reads. What a single track's detail needs and no list does (the fingerprint, the
+    /// pre-enrichment tags beyond the ones Tag review shows, build errors, sort names) is in
+    /// <c>GET /songs/{id}/enrichment-detail</c>. Add a field here only when a list uses it:
+    /// every field costs its name and value once per song.
+    /// </para>
     /// </summary>
     internal static async Task<IResult> ListSongs(
         MusicHoarderDbContext db,
@@ -297,7 +305,6 @@ public static class SongsEndpoints
                 s.FileName,
                 s.Extension,
                 s.FileSizeBytes,
-                s.LastModifiedUtc,
                 s.IndexedAtUtc,
                 s.AcquiredAtUtc,
                 s.DeletedAtUtc,
@@ -323,40 +330,26 @@ public static class SongsEndpoints
                 s.LrclibId,
                 s.Genre,
                 s.ReleaseDate,
-                s.OriginalReleaseDate,
                 s.Label,
                 s.CatalogNumber,
                 s.Upc,
                 s.Composer,
                 s.Copyright,
-                s.ArtistSort,
-                s.AlbumArtistSort,
                 s.EnrichmentStatus,
                 s.MatchedBy,
                 s.MatchConfidence,
                 s.MatchWarnings,
-                s.EnrichedAtUtc,
                 s.EnrichmentError,
                 s.OriginalMetadataCaptured,
                 s.OriginalArtist,
-                s.OriginalAlbumArtist,
                 s.OriginalAlbum,
                 s.OriginalTitle,
-                s.OriginalYear,
-                s.OriginalTrackNumber,
-                s.OriginalIsrc,
-                s.OriginalMusicBrainzId,
-                s.OriginalSpotifyId,
-                s.OriginalMetadataCapturedAtUtc,
                 s.IsUnreleased,
                 s.IsDuplicate,
                 s.DuplicateOfId,
                 s.LibraryBuildStatus,
                 s.LibraryBuiltAtUtc,
-                s.LibraryBuildLastAttemptedAtUtc,
-                s.LibraryBuildError,
                 s.DestinationPath,
-                s.PreviousDestinationPath,
                 s.LyricsStatus,
                 // Only what the list says about the lyrics, decided in the database: the text itself
                 // (kilobytes per song) is fetched per track by GetTrackLyrics.
@@ -370,7 +363,6 @@ public static class SongsEndpoints
                 HasTranscribedLyrics =
                     (s.TranscribedSyncedLyrics != null && s.TranscribedSyncedLyrics != string.Empty)
                     || (s.TranscribedPlainLyrics != null && s.TranscribedPlainLyrics != string.Empty),
-                s.TranscriptionStatus,
                 s.TranscribedAtUtc,
                 s.TranscriptionModel,
                 s.PreferredLyricsSource,
@@ -404,15 +396,15 @@ public static class SongsEndpoints
             return new
             {
             s.Id, s.SourcePath, s.FileName, s.Extension, s.FileSizeBytes,
-            s.LastModifiedUtc, s.IndexedAtUtc, s.AcquiredAtUtc, s.DeletedAtUtc,
+            s.IndexedAtUtc, s.AcquiredAtUtc, s.DeletedAtUtc,
             s.Artist, s.Artists, s.AlbumArtist, s.Album, s.Title, s.Year, s.TrackNumber,
             s.DurationSeconds, s.DurationMs,
             s.Bitrate,
             s.HasCoverArt,
             s.HasFingerprint,
                 s.Isrc, s.MusicBrainzId, s.MusicBrainzReleaseId, s.SpotifyId, s.AcoustIdTrackId, s.LrclibId,
-            s.Genre, s.ReleaseDate, s.OriginalReleaseDate, s.Label, s.CatalogNumber, s.Upc,
-            s.Composer, s.Copyright, s.ArtistSort, s.AlbumArtistSort,
+            s.Genre, s.ReleaseDate, s.Label, s.CatalogNumber, s.Upc,
+            s.Composer, s.Copyright,
             s.EnrichmentStatus, s.MatchedBy, s.MatchConfidence,
             MatchWarnings = matchWarnings,
             // Released vs unreleased (leak/snippet/stem), derived from the tracker category the
@@ -420,20 +412,17 @@ public static class SongsEndpoints
             ReleaseClassification = ReleaseClassifier
                 .Classify(s.IsUnreleased, s.EnrichmentStatus, s.MatchedBy, matchWarnings, s.Isrc, s.SpotifyId)
                 .ToString(),
-            s.EnrichedAtUtc, s.EnrichmentError,
-            s.OriginalMetadataCaptured, s.OriginalArtist, s.OriginalAlbumArtist,
-            s.OriginalAlbum, s.OriginalTitle, s.OriginalYear, s.OriginalTrackNumber,
-            s.OriginalIsrc, s.OriginalMusicBrainzId, s.OriginalSpotifyId,
-            s.OriginalMetadataCapturedAtUtc,
+            s.EnrichmentError,
+            s.OriginalMetadataCaptured, s.OriginalArtist,
+            s.OriginalAlbum, s.OriginalTitle,
             s.IsDuplicate, s.DuplicateOfId,
-            s.LibraryBuildStatus, s.LibraryBuiltAtUtc, s.LibraryBuildLastAttemptedAtUtc,
-            s.LibraryBuildError, s.DestinationPath, s.PreviousDestinationPath,
+            s.LibraryBuildStatus, s.LibraryBuiltAtUtc,
+            s.DestinationPath,
             LyricsStatus = s.LyricsStatus.ToString(),
             s.HasSyncedLyrics,
             s.HasPlainLyrics,
             s.IsInstrumental,
             s.HasTranscribedLyrics,
-            TranscriptionStatus = s.TranscriptionStatus.ToString(),
             s.TranscribedAtUtc,
             s.TranscriptionModel,
             PreferredLyricsSource = s.PreferredLyricsSource.ToString(),

@@ -129,15 +129,12 @@ export interface ApiSong {
   /** Full release date as an ISO string (YYYY-MM-DD or partial); {@link year} is the coarse form. */
   releaseDate?: string | null
   /** Original (first) release date of the release-group, ISO string. */
-  originalReleaseDate?: string | null
   label?: string | null
   catalogNumber?: string | null
   /** Album barcode / UPC. */
   upc?: string | null
   composer?: string | null
   copyright?: string | null
-  artistSort?: string | null
-  albumArtistSort?: string | null
   enrichmentStatus?: string | number | null
   /** When the scanner first indexed the file (always set). */
   indexedAtUtc?: string | null
@@ -163,11 +160,8 @@ export interface ApiSong {
   enrichmentError?: string | null
   originalMetadataCaptured?: boolean | null
   originalArtist?: string | null
-  originalAlbumArtist?: string | null
   originalAlbum?: string | null
   originalTitle?: string | null
-  originalYear?: number | null
-  originalTrackNumber?: number | null
   lyricsStatus?: string | null
   hasSyncedLyrics?: boolean | null
   hasPlainLyrics?: boolean | null
@@ -177,7 +171,6 @@ export interface ApiSong {
   /** True when an AI transcription exists. The (large) text is fetched on demand via fetchTrackLyrics. */
   hasTranscribedLyrics?: boolean | null
   /** "NotRequested" | "Pending" | "Completed" | "Failed". */
-  transcriptionStatus?: string | null
   transcribedAtUtc?: string | null
   transcriptionModel?: string | null
   /** Which lyrics the synced viewer shows when both exist: "Lrclib" | "Transcribed". */
