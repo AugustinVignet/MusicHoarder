@@ -145,11 +145,16 @@ function scheduleSongRefresh(): void {
 
 function openStream(): void {
   if (liveCleanup) return;
-  lastBuilt = -1;
+  // lastBuilt is kept across a reopen: what was built while the stream was closed still shows up
+  // as a change, and a stream that reopens onto the same count refetches nothing.
   sawActive = false;
   liveCleanup = openProgressStream(
     (snap: ProgressSnapshot) => {
-      if (snap.built !== lastBuilt) {
+      if (lastBuilt === -1) {
+        // The first snapshot this document sees is where the count stands, not a change to it.
+        // Treating it as one refetched the whole library a few seconds after every page load.
+        lastBuilt = snap.built;
+      } else if (snap.built !== lastBuilt) {
         lastBuilt = snap.built;
         sawActive = true;
         scheduleSongRefresh();
@@ -254,6 +259,7 @@ function notePlayed(id: number): void {
  */
 function reset(): void {
   songs = [];
+  lastBuilt = -1;
   albumDtos = [];
   detailAlbumDtos = [];
   detailAlbumsRequested = false;
