@@ -312,7 +312,9 @@ public static class SongsEndpoints
                 s.DurationMs,
                 s.Bitrate,
                 s.HasCoverArt,
-                s.Fingerprint,
+                // A flag, not the value: a Chromaprint fingerprint is a few kilobytes per song, and
+                // was half of this response. One track's fingerprint is in its enrichment detail.
+                HasFingerprint = s.Fingerprint != null && s.Fingerprint != string.Empty,
                 s.Isrc,
                 s.MusicBrainzId,
                 s.MusicBrainzReleaseId,
@@ -356,8 +358,12 @@ public static class SongsEndpoints
                 s.DestinationPath,
                 s.PreviousDestinationPath,
                 s.LyricsStatus,
-                s.SyncedLyrics,
-                s.PlainLyrics,
+                // Only what the list says about the lyrics, decided in the database: the text itself
+                // (kilobytes per song) is fetched per track by GetTrackLyrics.
+                HasSyncedLyrics = s.SyncedLyrics != null && s.SyncedLyrics != string.Empty,
+                HasPlainLyrics = s.PlainLyrics != null && s.PlainLyrics != string.Empty,
+                SyncedLyricsBlank = string.IsNullOrWhiteSpace(s.SyncedLyrics),
+                PlainLyricsBlank = string.IsNullOrWhiteSpace(s.PlainLyrics),
                 s.IsInstrumental,
                 // Lightweight transcription flags only — the (potentially large) AI lyric text is fetched
                 // on demand via GetTrackLyrics, not shipped with every row in the songs list.
@@ -403,7 +409,7 @@ public static class SongsEndpoints
             s.DurationSeconds, s.DurationMs,
             s.Bitrate,
             s.HasCoverArt,
-            s.Fingerprint,
+            s.HasFingerprint,
                 s.Isrc, s.MusicBrainzId, s.MusicBrainzReleaseId, s.SpotifyId, s.AcoustIdTrackId, s.LrclibId,
             s.Genre, s.ReleaseDate, s.OriginalReleaseDate, s.Label, s.CatalogNumber, s.Upc,
             s.Composer, s.Copyright, s.ArtistSort, s.AlbumArtistSort,
@@ -423,8 +429,8 @@ public static class SongsEndpoints
             s.LibraryBuildStatus, s.LibraryBuiltAtUtc, s.LibraryBuildLastAttemptedAtUtc,
             s.LibraryBuildError, s.DestinationPath, s.PreviousDestinationPath,
             LyricsStatus = s.LyricsStatus.ToString(),
-            HasSyncedLyrics = s.SyncedLyrics != null && s.SyncedLyrics != string.Empty,
-            HasPlainLyrics = s.PlainLyrics != null && s.PlainLyrics != string.Empty,
+            s.HasSyncedLyrics,
+            s.HasPlainLyrics,
             s.IsInstrumental,
             s.HasTranscribedLyrics,
             TranscriptionStatus = s.TranscriptionStatus.ToString(),
@@ -437,9 +443,9 @@ public static class SongsEndpoints
                 showingTranscription:
                     s.HasTranscribedLyrics
                     && (s.PreferredLyricsSource == PreferredLyricsSource.Transcribed
-                        || (string.IsNullOrWhiteSpace(s.SyncedLyrics) && string.IsNullOrWhiteSpace(s.PlainLyrics))),
+                        || (s.SyncedLyricsBlank && s.PlainLyricsBlank)),
                 alignedToReference: s.TranscriptionAlignedToReference,
-                hasSyncedLyrics: !string.IsNullOrWhiteSpace(s.SyncedLyrics),
+                hasSyncedLyrics: !s.SyncedLyricsBlank,
                 syncOffsetMs: s.LyricsSyncOffsetMs).ToString(),
             LyricsSyncStatus = s.LyricsSyncStatus.ToString(),
             s.LyricsSyncIssue,
@@ -1479,6 +1485,8 @@ public static class SongsEndpoints
             matchConfidence = song.MatchConfidence,
             matchWarnings = DeserializeWarnings(song.MatchWarnings),
             enrichmentError = song.EnrichmentError,
+            // The full Chromaprint fingerprint lives here; the song list only says whether one exists.
+            fingerprint = song.Fingerprint,
             originalMetadataCaptured = song.OriginalMetadataCaptured,
             source,
             current,

@@ -113,7 +113,11 @@ export interface ApiSong {
   year?: number | null
   trackNumber?: number | null
   durationSeconds?: number | null
-  fingerprint?: string | null
+  /**
+   * Whether the file has been fingerprinted. The list does not carry the Chromaprint string itself
+   * (kilobytes per song); a track's own is `EnrichmentDetail.fingerprint`.
+   */
+  hasFingerprint?: boolean
   isrc?: string | null
   musicBrainzId?: string | null
   musicBrainzReleaseId?: string | null
@@ -4388,6 +4392,8 @@ export interface ChangeLogEntry {
 
 export interface EnrichmentDetail {
   id: number
+  /** The track's full Chromaprint fingerprint, when it has one. */
+  fingerprint?: string | null
   fileName: string
   sourcePath: string
   destinationPath?: string | null
