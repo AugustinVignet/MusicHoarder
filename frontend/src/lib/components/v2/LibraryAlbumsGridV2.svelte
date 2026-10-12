@@ -132,9 +132,27 @@
     }
     openMenu(album, { x: e.clientX, y: e.clientY }, tile);
   }
+
+  // A library's grid is hundreds of tiles, and building them all in one task held the main thread
+  // for the whole navigation (over a second on a phone). Every album gets its link at once, so
+  // the grid has its full height and scroll position from the first frame; the covers, labels
+  // and buttons inside are built for the first screenful, then for the rest in idle slices.
+  const FIRST_FILL = 36;
+  const FILL_STEP = 48;
+  let filledCount = $state(FIRST_FILL);
+  $effect(() => {
+    if (filledCount >= albums.length) return;
+    const fill = () => (filledCount += FILL_STEP);
+    if (typeof requestIdleCallback === 'function') {
+      const handle = requestIdleCallback(fill, { timeout: 200 });
+      return () => cancelIdleCallback(handle);
+    }
+    const handle = setTimeout(fill, 16);
+    return () => clearTimeout(handle);
+  });
 </script>
 
-{#snippet tile(album: AlbumSummary, shelf: boolean)}
+{#snippet tile(album: AlbumSummary, shelf: boolean, filled: boolean)}
   {@const badge = badgeFor(album)}
   <a
     href={hrefFor(album)}
@@ -147,6 +165,13 @@
     )}
     aria-label={`Open album ${album.title} by ${album.artist}`}
   >
+    {#if !filled}
+      <!-- Not built yet (see `filledCount`): the link is already a working tile of the right size. -->
+      <div class="flex flex-col gap-2" aria-hidden="true">
+        <div class="bg-muted aspect-square w-full rounded-lg"></div>
+        <div class="h-9"></div>
+      </div>
+    {:else}
     <!-- The hold (and its 97% press feedback) lives on this inner box, not on the link: on a shelf
          the link is the snap target, and scaling it made Chromium re-snap the row, which read as
          a scroll and cancelled the hold on the first tile. -->
@@ -211,6 +236,7 @@
         {/if}
       </div>
     </div>
+    {/if}
   </a>
 {/snippet}
 
@@ -246,14 +272,14 @@
   >
     <div class="flex gap-3 px-4 pt-2 pb-3 md:gap-4 md:px-7">
       {#each albums as album (album.key)}
-        {@render tile(album, true)}
+        {@render tile(album, true, true)}
       {/each}
     </div>
   </ScrollArea>
 {:else}
   <div class={GRID_CLASS}>
-    {#each albums as album (album.key)}
-      {@render tile(album, false)}
+    {#each albums as album, i (album.key)}
+      {@render tile(album, false, i < filledCount)}
     {/each}
   </div>
 {/if}
