@@ -73,7 +73,7 @@ public sealed class ArtistDuplicateService(
 
     public async Task<ArtistDuplicateReport> DetectAsync(Guid ownerUserId, CancellationToken ct = default)
     {
-        var songs = await QueryEligible(ownerUserId).AsNoTracking().ToListAsync(ct);
+        var songs = await QueryEligible(ownerUserId).WithoutHeavyText(db).ToListAsync(ct);
         var dismissed = await LoadDismissedPairsAsync(ownerUserId, ct);
 
         var stats = CollectNameStats(songs);

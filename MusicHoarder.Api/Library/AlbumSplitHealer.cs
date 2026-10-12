@@ -56,7 +56,7 @@ public sealed class AlbumSplitHealer(
     {
         // Untracked copies: the restore and ApplyIdentityCorrection below mutate them to count would-be
         // changes with the exact heal logic, but nothing is saved.
-        var songs = await QueryEligible().AsNoTracking().ToListAsync(ct);
+        var songs = await QueryEligible().WithoutHeavyText(db).ToListAsync(ct);
         var canonicalAlbums = await LoadCanonicalAlbumsAsync(ct);
         var artistAliases = await ArtistAliasMap.LoadAsync(db, ct);
         var (restored, _) = await RestoreForeignAlbumArtistsAsync(songs, canonicalAlbums, DateTime.UtcNow, persist: false, ct);
