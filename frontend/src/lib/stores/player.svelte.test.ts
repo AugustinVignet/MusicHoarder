@@ -604,6 +604,34 @@ describe('the position while a song plays', () => {
     expect(playerStore.currentTime).toBe(5.1);
   });
 
+  it('keeps nobody who needs the exact second waiting: a report, a seek and the lock screen read the element', async () => {
+    const setPositionState = vi.fn();
+    vi.stubGlobal('MediaMetadata', class {});
+    vi.stubGlobal('navigator', {
+      audioSession,
+      mediaSession: { metadata: null, setActionHandler: () => {}, setPositionState }
+    });
+    const { playerStore, audio } = await playing();
+    const { localPlayback } = await import('./player.svelte');
+    audio.duration = 200;
+    audio.dispatchEvent(new Event('loadedmetadata'));
+    audio.currentTime = 5;
+    frames.draw(1000);
+
+    // Forty milliseconds on, between two commits: what is shown waits, what is reported does not.
+    audio.currentTime = 5.04;
+    expect(playerStore.currentTime).toBe(5);
+    expect(localPlayback.state()).toMatchObject({ positionMs: 5040, durationMs: 200_000 });
+
+    playerStore.seek(42);
+    expect(playerStore.currentTime).toBe(42);
+    expect(setPositionState).toHaveBeenLastCalledWith({
+      duration: 200,
+      position: 42,
+      playbackRate: 1
+    });
+  });
+
   it('stops with the song, and a pause shows the exact second it stopped at', async () => {
     const { playerStore, audio } = await playing();
     frames.draw(1000);
@@ -799,6 +827,22 @@ describe('surviving a reload', () => {
     doc.hidden = true;
     playerStore.seek(30); // the lock screen's scrubber
     expect(writes).toEqual([QUEUE_ENTRY, SMALL_ENTRY]);
+  });
+
+  it('writes nothing in the hand-off to the next track while the app is in the background', async () => {
+    const { playerStore, audio } = await boot();
+    await playerStore.startQueue(library(3), 0);
+    pageEvents.get('pagehide')!();
+    audio.playFrom(200);
+    audio.play.mockClear();
+    writes = [];
+
+    doc.hidden = true;
+    audio.loopToStart();
+    // The next song is on the element and asked to play; the storage was not touched on the way.
+    expect(audio.src).toBe('/api/mh/songs/2/stream');
+    expect(audio.play).toHaveBeenCalledTimes(1);
+    expect(writes).toEqual([]);
   });
 
   it('brings back exactly what was playing: a library-sized queue in its order, the song, the second, the station', async () => {
