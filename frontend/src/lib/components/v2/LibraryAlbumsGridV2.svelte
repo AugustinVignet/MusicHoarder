@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
+  import { MediaQuery } from 'svelte/reactivity';
   import { goto } from '$app/navigation';
   import { Disc3, Mic2, Play, Shuffle } from '@lucide/svelte';
   import { EmptyState } from '$lib/components/ui/empty-state';
@@ -15,6 +16,7 @@
   } from '$lib/api-client';
   import { playerStore } from '$lib/stores/player.svelte';
   import { cn, shuffle } from '$lib/utils';
+  import { carryBuiltTiles, watchNearViewport } from '$lib/viewport-fill';
 
   // Safe to server-render: everything interactive is opt-in and browser-only — the menu is off
   // unless asked for, and the long-press action and the menu's DOM only exist in the browser.
@@ -136,12 +138,20 @@
   // A library's grid is hundreds of tiles, and building them all in one task held the main thread
   // for the whole navigation (over a second on a phone). Every album gets its link at once, so
   // the grid has its full height and scroll position from the first frame; the covers, labels
-  // and buttons inside are built for the first screenful, then for the rest in idle slices.
+  // and buttons inside are built for the first screenful, then for the rest as below.
   const FIRST_FILL = 36;
   const FILL_STEP = 48;
+
+  // With a mouse or trackpad at md and wider, the rest are built in idle slices until every album
+  // has its tile: that is where find-in-page is used, and it only finds what has been built.
+  // Everywhere else (a phone, a tablet, a narrow window) building them all doubled the page's
+  // memory and kept the main thread busy for over a second after the grid was already usable, for
+  // tiles most visits never scroll to — so there a tile is built when it comes near the screen.
+  const fillsEverything = new MediaQuery('(min-width: 768px) and (pointer: fine)');
+
   let filledCount = $state(FIRST_FILL);
   $effect(() => {
-    if (filledCount >= albums.length) return;
+    if (!fillsEverything.current || filledCount >= albums.length) return;
     const fill = () => (filledCount += FILL_STEP);
     if (typeof requestIdleCallback === 'function') {
       const handle = requestIdleCallback(fill, { timeout: 200 });
@@ -150,12 +160,50 @@
     const handle = setTimeout(fill, 16);
     return () => clearTimeout(handle);
   });
+
+  // The albums whose tile has been built there: the first screenful, and each one that came
+  // within two screens of the viewport or took focus (see `$lib/viewport-fill`). By key, and never
+  // taken back while the album stays in the list, so a re-sort moves built tiles instead of tearing
+  // them down. `$state.raw`, replaced per batch: one set read by every tile is cheaper than a
+  // signal per album.
+  //
+  // It starts as what the first frame builds by position, so on a fresh grid the effect below finds
+  // nothing to add: a write there, right after mount, would make every one of the hundreds of
+  // tiles just created check again whether it is built (tens of milliseconds on a phone).
+  let gridEl = $state<HTMLElement | null>(null);
+  let builtKeys = $state.raw<ReadonlySet<string>>(
+    carryBuiltTiles(
+      new Set(),
+      untrack(() => albums),
+      FIRST_FILL
+    )
+  );
+  $effect(() => {
+    const grid = gridEl;
+    const list = albums;
+    // A shelf is a dozen tiles, all built.
+    if (layout === 'shelf' || fillsEverything.current) return;
+    // Before the grid check: a list that emptied has no grid, and must still be forgotten.
+    untrack(() => (builtKeys = carryBuiltTiles(builtKeys, list, FIRST_FILL)));
+    if (!grid) return;
+    // A new watcher per list: a changed list can hold links that did not exist a moment ago.
+    const watcher = watchNearViewport(grid, {
+      attribute: 'data-album-key',
+      onnear: (keys) =>
+        untrack(() => {
+          const fresh = keys.filter((key) => !builtKeys.has(key));
+          if (fresh.length > 0) builtKeys = new Set([...builtKeys, ...fresh]);
+        })
+    });
+    return () => watcher.destroy();
+  });
 </script>
 
 {#snippet tile(album: AlbumSummary, shelf: boolean, filled: boolean)}
   {@const badge = badgeFor(album)}
   <a
     href={hrefFor(album)}
+    data-album-key={shelf ? undefined : album.key}
     oncontextmenu={menu ? (e) => onTileContextMenu(e, album) : undefined}
     class={cn(
       'group focus-visible:ring-ring flex flex-col rounded-lg outline-hidden focus-visible:ring-2 focus-visible:ring-offset-2',
@@ -166,7 +214,8 @@
     aria-label={`Open album ${album.title} by ${album.artist}`}
   >
     {#if !filled}
-      <!-- Not built yet (see `filledCount`): the link is already a working tile of the right size. -->
+      <!-- Not built yet (see `filledCount` and `builtKeys`): the link is already a working tile of
+           the right size. -->
       <div class="flex flex-col gap-2" aria-hidden="true">
         <div class="bg-muted aspect-square w-full rounded-lg"></div>
         <div class="h-9"></div>
@@ -277,9 +326,9 @@
     </div>
   </ScrollArea>
 {:else}
-  <div class={GRID_CLASS}>
+  <div class={GRID_CLASS} bind:this={gridEl}>
     {#each albums as album, i (album.key)}
-      {@render tile(album, false, i < filledCount)}
+      {@render tile(album, false, i < filledCount || builtKeys.has(album.key))}
     {/each}
   </div>
 {/if}
