@@ -478,6 +478,12 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     cache: "no-store",
   })
 
+  await throwIfFailed(path, response)
+  return (await response.json()) as T
+}
+
+/** Turn a non-2xx response into the {@link ApiError} every caller expects. */
+async function throwIfFailed(path: string, response: Response): Promise<void> {
   if (!response.ok) {
     let detail = ""
     let code: string | null = null
@@ -521,8 +527,39 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(detail || `Request failed for ${path}: ${response.status}`, code, response.status)
   }
+}
 
-  return (await response.json()) as T
+/**
+ * The answer to a request that offered the server the validator of a copy already held: either the
+ * rows again with the validator they now carry, or word that the held copy is still current.
+ */
+export type Revalidated<T> =
+  | { notModified: false; data: T; etag: string | null }
+  /** `etag` is the validator that was sent — the copy this answer is about. */
+  | { notModified: true; etag: string }
+
+/**
+ * GET a list, saying which copy of it is already held. The API answers the two library lists with
+ * `304` and no body when that copy is current, which spares downloading and parsing the whole
+ * library to learn that nothing changed.
+ *
+ * `cache: "no-store"` stays: the browser then hands the bare 304 to this code instead of
+ * answering from an HTTP cache of its own, so the only copy of the rows is the one the caller
+ * holds in memory and the validator can never outlive it. Pass `null` when no copy is held — the
+ * request is then unconditional, and a 304 to it is an error rather than "keep what you have".
+ */
+async function requestJsonIfChanged<T>(path: string, etag: string | null): Promise<Revalidated<T>> {
+  const response = await fetch(`${API_PREFIX}${path}`, {
+    headers: etag ? { "if-none-match": etag } : undefined,
+    cache: "no-store",
+  })
+
+  if (response.status === 304) {
+    if (etag) return { notModified: true, etag }
+    throw new ApiError(`Request failed for ${path}: 304 to a request that named no copy`, null, 304)
+  }
+  await throwIfFailed(path, response)
+  return { notModified: false, data: (await response.json()) as T, etag: response.headers.get("etag") }
 }
 
 // The running build's version (clean semver, matching the GitHub release / Docker tag). Accepts an
@@ -659,16 +696,31 @@ export interface AlbumQuery {
   unreleased?: boolean
 }
 
-export async function fetchAlbums(query: AlbumQuery = {}): Promise<AlbumSummaryDto[]> {
+function albumsPath(query: AlbumQuery): string {
   const params = new URLSearchParams()
   if (query.builtOnly === false) params.set("builtOnly", "false")
   if (query.merge === false) params.set("merge", "false")
   if (query.artist) params.set("artist", query.artist)
   if (query.year) params.set("year", query.year)
   if (query.unreleased) params.set("unreleased", "true")
-  const suffix = params.size > 0 ? `?${params}` : ""
-  const result = await requestJson<{ albums: AlbumSummaryDto[] }>(`/api/albums${suffix}`)
+  return `/api/albums${params.size > 0 ? `?${params}` : ""}`
+}
+
+export async function fetchAlbums(query: AlbumQuery = {}): Promise<AlbumSummaryDto[]> {
+  const result = await requestJson<{ albums: AlbumSummaryDto[] }>(albumsPath(query))
   return result.albums ?? []
+}
+
+/**
+ * {@link fetchAlbums} for a caller that already holds the cards: `etag` is the validator they came
+ * with, and must have come from the same `query`. See {@link requestJsonIfChanged}.
+ */
+export async function fetchAlbumsIfChanged(
+  query: AlbumQuery,
+  etag: string | null,
+): Promise<Revalidated<AlbumSummaryDto[]>> {
+  const result = await requestJsonIfChanged<{ albums: AlbumSummaryDto[] }>(albumsPath(query), etag)
+  return result.notModified ? result : { ...result, data: result.data.albums ?? [] }
 }
 
 /**
@@ -1164,6 +1216,18 @@ export async function fetchSongs(includeDeleted = false): Promise<ApiSong[]> {
   const result = await requestJson<SongsResponse>(`/songs?includeDeleted=${includeDeleted}`)
   grantors = result.grantors ?? []
   return result.songs ?? []
+}
+
+/**
+ * {@link fetchSongs} for a caller that already holds the rows: `etag` is the validator they came
+ * with. On "not modified" nothing here is touched — the grantors are part of the same response,
+ * so the copy from the load that produced those rows still describes them.
+ */
+export async function fetchSongsIfChanged(etag: string | null): Promise<Revalidated<ApiSong[]>> {
+  const result = await requestJsonIfChanged<SongsResponse>("/songs?includeDeleted=false", etag)
+  if (result.notModified) return result
+  grantors = result.data.grantors ?? []
+  return { ...result, data: result.data.songs ?? [] }
 }
 
 /**

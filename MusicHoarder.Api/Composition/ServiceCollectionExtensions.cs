@@ -135,6 +135,9 @@ public static class ServiceCollectionExtensions
         // Both resolve ICurrentUserAccessor from RequestServices themselves.
         services.AddScoped<Sharing.ISharedLibraryGrantResolver, Sharing.SharedLibraryGrantResolver>();
         services.AddScoped<Sharing.ILibraryScopeResolver, Sharing.LibraryScopeResolver>();
+        // What lets GET /songs and GET /api/albums answer 304. Scoped: it reads through the
+        // request's own DbContext, as the caller the request resolved.
+        services.AddScoped<ILibraryChangeStamp, LibraryChangeStamp>();
         // Share-link open/play counter: holds the day's in-memory visitor salt and the per-share cap.
         services.AddSingleton<Sharing.ShareVisitTracker>();
 

@@ -13,15 +13,18 @@ import {
   buildArtistGroups,
   currentGrantors,
   fetchAlbums,
-  fetchSongs,
+  fetchAlbumsIfChanged,
+  fetchSongsIfChanged,
   hydrateAlbums,
   likeSong,
   openProgressStream,
   unlikeSong,
+  type AlbumQuery,
   type AlbumSummaryDto,
   type ApiSong,
   type Grantor,
-  type ProgressSnapshot
+  type ProgressSnapshot,
+  type Revalidated
 } from '$lib/api-client';
 import { isBuiltSong } from '$lib/album-sections';
 import { isTrackListSong } from '$lib/track-list-view.svelte';
@@ -49,6 +52,23 @@ let detailAlbumsRequested = false;
 export type DetailAlbumsState = 'idle' | 'loading' | 'loaded' | 'error';
 let detailAlbumsState = $state<DetailAlbumsState>('idle');
 let detailAlbumsGen = 0;
+/** The query behind {@link detailAlbumDtos}: every song, per folder, unmerged. */
+const DETAIL_ALBUMS: AlbumQuery = { builtOnly: false, merge: false };
+/**
+ * The validator (ETag) each list arrived with, sent back on the next load so the server can answer
+ * "unchanged" instead of the whole list — most refreshes of a library find nothing new, and used
+ * to download and re-render every row to learn that.
+ *
+ * One rule keeps them honest: **a validator is only ever set in the same statement block as the
+ * rows it came with, and is dropped the moment the store's copy stops being those rows** — on
+ * sign-out ({@link reset}), and when a row is changed locally ({@link patchSong}). So a non-null
+ * validator always means "the array held is exactly what the server sent under this tag", and a
+ * load with nothing held asks for the list outright. Memory only, like the rows: a reload or
+ * another account starts with none.
+ */
+let songsEtag: string | null = null;
+let albumsEtag: string | null = null;
+let detailAlbumsEtag: string | null = null;
 /**
  * Who shared the rows in {@link songs}. Lives HERE, as a rune, rather than in `api-client`:
  * that module is a plain `.ts` file, so its module-level copy cannot be reactive, and a
@@ -73,18 +93,48 @@ let loadsInFlight = 0;
  */
 const REVALIDATE_AFTER_MS = 30_000;
 
+/**
+ * Whether an answer can be applied to what the store holds now. Rows always can. "Unchanged" is
+ * about the copy whose validator was sent, so it only counts while that is still the copy held: a
+ * sign-out, a like or another load landing while the request was out leaves it describing rows
+ * the store no longer has — after a sign-out, no rows at all.
+ */
+function appliesTo<T>(answer: Revalidated<T>, held: string | null): boolean {
+  return !answer.notModified || answer.etag === held;
+}
+
 async function loadSongs(opts?: { silent?: boolean }): Promise<void> {
   loadsInFlight += 1;
   try {
     if (!opts?.silent) isLoading = true;
     // Both in one round trip. They are two views of the same library, so fetching them together
     // keeps the album cards from describing a song list that has already moved on.
-    const [loaded, grouped] = await Promise.all([fetchSongs(), fetchAlbums()]);
-    songs = loaded;
-    albumDtos = grouped;
+    let [loaded, grouped] = await Promise.all([
+      fetchSongsIfChanged(songsEtag),
+      fetchAlbumsIfChanged({}, albumsEtag)
+    ]);
+    // An "unchanged" that no longer applies is answered by asking for the lists themselves, which
+    // can only come back as rows — so nothing below can mark the library loaded without any. No
+    // await separates this check from the assignments, so it cannot go stale in between.
+    while (!appliesTo(loaded, songsEtag) || !appliesTo(grouped, albumsEtag)) {
+      [loaded, grouped] = await Promise.all([
+        fetchSongsIfChanged(null),
+        fetchAlbumsIfChanged({}, null)
+      ]);
+    }
+    // "Unchanged" leaves the array alone on purpose: replacing it, even with equal rows, would
+    // recompute every view derived from it and re-render every row on screen.
+    if (!loaded.notModified) {
+      songs = loaded.data;
+      songsEtag = loaded.etag;
+      // Read AFTER the await: the fetch populates the api-client's copy as it resolves.
+      grantors = currentGrantors();
+    }
+    if (!grouped.notModified) {
+      albumDtos = grouped.data;
+      albumsEtag = grouped.etag;
+    }
     if (detailAlbumsRequested) void loadDetailAlbums();
-    // Read AFTER the await: fetchSongs populates the api-client's copy as it resolves.
-    grantors = currentGrantors();
     hasLoaded = true;
     loadedAt = Date.now();
     error = null;
@@ -110,9 +160,14 @@ async function loadDetailAlbums(): Promise<void> {
   const gen = ++detailAlbumsGen;
   if (detailAlbumsState !== 'loaded') detailAlbumsState = 'loading';
   try {
-    const loaded = await fetchAlbums({ builtOnly: false, merge: false });
+    const loaded = await fetchAlbumsIfChanged(DETAIL_ALBUMS, detailAlbumsEtag);
     if (gen !== detailAlbumsGen) return; // a newer request (or a sign-out) superseded this one
-    detailAlbumDtos = loaded;
+    // Only this function and reset() touch the detail cards, and both move the generation — so an
+    // "unchanged" that gets past the line above is about the cards still held.
+    if (!loaded.notModified) {
+      detailAlbumDtos = loaded.data;
+      detailAlbumsEtag = loaded.etag;
+    }
     detailAlbumsState = 'loaded';
   } catch {
     if (gen !== detailAlbumsGen) return;
@@ -225,6 +280,9 @@ function patchSong(id: number, patch: Partial<ApiSong>): void {
   const next = songs.slice();
   next[index] = { ...songs[index], ...patch };
   songs = next;
+  // No longer the rows the server sent, so its validator no longer describes them: the next load
+  // asks for the list itself and overwrites this, as a refresh after a like or a play always has.
+  songsEtag = null;
 }
 
 /**
@@ -255,6 +313,8 @@ async function toggleLike(id: number): Promise<void> {
 async function refreshAlbums(): Promise<void> {
   try {
     albumDtos = await fetchAlbums();
+    // Fetched without a validator; the one held came with the cards this just replaced.
+    albumsEtag = null;
     if (detailAlbumsRequested) await loadDetailAlbums();
   } catch {
     // Keep the cards we have; the next full refresh reconciles.
@@ -279,6 +339,11 @@ function reset(): void {
   lastBuilt = -1;
   albumDtos = [];
   detailAlbumDtos = [];
+  // With the rows go their validators: a load after this must ask for the lists outright, and an
+  // "unchanged" still on its way back must find nothing here that it could be about.
+  songsEtag = null;
+  albumsEtag = null;
+  detailAlbumsEtag = null;
   detailAlbumsRequested = false;
   detailAlbumsState = 'idle';
   detailAlbumsGen += 1;

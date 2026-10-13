@@ -8,6 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fetchAlbums = vi.fn();
 const fetchSongs = vi.fn(async (): Promise<unknown[]> => []);
+// The store's own loads ask conditionally. By default the server answers with the rows and no
+// validator — an API that has none to give — so the tests that are not about revalidation read
+// as they always did, through `fetchSongs` and `fetchAlbums`. The ones that are script these two.
+const fetchSongsIfChanged = vi.fn();
+const fetchAlbumsIfChanged = vi.fn();
 const likeSong = vi.fn();
 const closeStream = vi.fn();
 const openProgressStream = vi.fn(() => closeStream);
@@ -17,7 +22,9 @@ vi.mock('$lib/api-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api-client')>()),
   currentGrantors: () => [],
   fetchAlbums: (...args: unknown[]) => fetchAlbums(...args),
+  fetchAlbumsIfChanged: (...args: unknown[]) => fetchAlbumsIfChanged(...args),
   fetchSongs: () => fetchSongs(),
+  fetchSongsIfChanged: (...args: unknown[]) => fetchSongsIfChanged(...args),
   hydrateAlbums: (dtos: unknown[]) => dtos,
   likeSong: (id: number) => likeSong(id),
   openProgressStream: () => openProgressStream(),
@@ -29,6 +36,18 @@ beforeEach(() => {
   fetchAlbums.mockReset();
   fetchSongs.mockReset();
   fetchSongs.mockResolvedValue([]);
+  fetchSongsIfChanged.mockReset();
+  fetchSongsIfChanged.mockImplementation(async () => ({
+    notModified: false,
+    data: await fetchSongs(),
+    etag: null
+  }));
+  fetchAlbumsIfChanged.mockReset();
+  fetchAlbumsIfChanged.mockImplementation(async (query: unknown) => ({
+    notModified: false,
+    data: await fetchAlbums(query),
+    etag: null
+  }));
   likeSong.mockReset();
   openProgressStream.mockClear();
   closeStream.mockClear();
@@ -204,5 +223,279 @@ describe('live stream', () => {
     expect(closeStream).toHaveBeenCalledOnce();
     vi.advanceTimersByTime(60_000);
     expect(closeStream).toHaveBeenCalledOnce();
+  });
+});
+
+/**
+ * The store offers the server the validator each list arrived with, and on "unchanged" keeps the
+ * arrays it holds. The danger is the other direction — taking "unchanged" at its word when the
+ * rows it was about are gone — so most of these are about when the store asks again instead.
+ */
+describe('revalidating against the server', () => {
+  afterEach(() => vi.useRealTimers());
+
+  const song = (id: number, extra: Record<string, unknown> = {}) => ({
+    id,
+    fileName: `${id}.mp3`,
+    sourcePath: `/src/${id}.mp3`,
+    fileSizeBytes: 1,
+    title: `Song ${id}`,
+    album: 'Album',
+    isBuilt: true,
+    ...extra
+  });
+  const rows = <T>(data: T, etag: string | null) => ({ notModified: false as const, data, etag });
+  const unchanged = (etag: string) => ({ notModified: true as const, etag });
+
+  /** A store that has loaded `songs` and `cards`, holding the validators `s1` and `a1`. */
+  async function loadedStore(
+    songs: unknown[] = [song(1), song(2)],
+    cards: unknown[] = [{ key: 'a' }]
+  ) {
+    fetchSongsIfChanged.mockResolvedValueOnce(rows(songs, 's1'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(rows(cards, 'a1'));
+    const store = await freshStore();
+    await store.loadSongs();
+    return { store, songs, cards };
+  }
+
+  it('asks outright the first time, then offers what it holds and keeps the same rows', async () => {
+    const { store, songs, cards } = await loadedStore();
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith(null);
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({}, null);
+
+    fetchSongsIfChanged.mockResolvedValueOnce(unchanged('s1'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('a1'));
+    await store.loadSongs({ silent: true });
+
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith('s1');
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({}, 'a1');
+    // The very arrays, not equal copies: a new array would re-derive every view and re-render.
+    expect(store.songs).toBe(songs);
+    expect(store.albums).toBe(cards);
+    expect(store.error).toBeNull();
+  });
+
+  it('counts "unchanged" as a load: the copy is fresh again and an old error is cleared', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-24T10:00:00Z'));
+    const { store, songs } = await loadedStore();
+
+    // A refresh that could not reach the server leaves the rows, and says so.
+    vi.setSystemTime(new Date('2026-09-24T10:00:30Z'));
+    fetchSongsIfChanged.mockRejectedValueOnce(new Error('offline'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('a1'));
+    store.revalidate();
+    await flush();
+    expect(store.error).toBe('offline');
+    expect(store.songs).toBe(songs);
+
+    fetchSongsIfChanged.mockResolvedValueOnce(unchanged('s1'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('a1'));
+    store.revalidate();
+    await flush();
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith('s1');
+    expect(store.error).toBeNull();
+    expect(store.songs).toBe(songs);
+
+    // Fresh for another half minute, exactly as after a download.
+    vi.setSystemTime(new Date('2026-09-24T10:00:59Z'));
+    store.revalidate();
+    expect(fetchSongsIfChanged).toHaveBeenCalledTimes(3);
+    vi.setSystemTime(new Date('2026-09-24T10:01:00Z'));
+    store.revalidate();
+    expect(fetchSongsIfChanged).toHaveBeenCalledTimes(4);
+    await flush();
+  });
+
+  it('replaces only the list that changed, and holds its new validator', async () => {
+    const { store, songs } = await loadedStore();
+    const regrouped = [{ key: 'a' }, { key: 'b' }];
+
+    fetchSongsIfChanged.mockResolvedValueOnce(unchanged('s1'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(rows(regrouped, 'a2'));
+    await store.loadSongs({ silent: true });
+    expect(store.songs).toBe(songs);
+    expect(store.albums).toBe(regrouped);
+
+    await store.loadSongs({ silent: true });
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith('s1');
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({}, 'a2');
+  });
+
+  it('asks outright again when the server gave no validator', async () => {
+    fetchSongs.mockResolvedValue([song(1)]);
+    fetchAlbums.mockResolvedValue([]);
+    const store = await freshStore();
+    await store.loadSongs();
+    await store.loadSongs({ silent: true });
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith(null);
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({}, null);
+  });
+
+  it('forgets the validators on sign-out', async () => {
+    const { store } = await loadedStore();
+    store.reset();
+    expect(store.songs).toEqual([]);
+
+    fetchSongs.mockResolvedValue([song(9)]);
+    fetchAlbums.mockResolvedValue([]);
+    await store.loadSongs();
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith(null);
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({}, null);
+    expect(store.songs.map((s) => s.id)).toEqual([9]);
+  });
+
+  it('asks again when a sign-out emptied the store while "unchanged" was on its way', async () => {
+    const { store } = await loadedStore();
+    let answer: (v: unknown) => void = () => {};
+    fetchSongsIfChanged.mockReturnValueOnce(new Promise((r) => (answer = r)));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('a1'));
+    const refresh = store.loadSongs({ silent: true });
+
+    store.reset();
+    const sentAgain = [song(7)];
+    fetchSongsIfChanged.mockResolvedValueOnce(rows(sentAgain, 's2'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(rows([{ key: 'z' }], 'a2'));
+    answer(unchanged('s1'));
+    await refresh;
+
+    // Not "loaded, with nothing in it": the lists themselves were asked for, and these are they.
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith(null);
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({}, null);
+    expect(store.songs).toBe(sentAgain);
+    expect(store.albums).toEqual([{ key: 'z' }]);
+  });
+
+  it('stays unloaded when that second request fails, so the next page visit loads again', async () => {
+    const { store } = await loadedStore();
+    let answer: (v: unknown) => void = () => {};
+    fetchSongsIfChanged.mockReturnValueOnce(new Promise((r) => (answer = r)));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('a1'));
+    const refresh = store.loadSongs({ silent: true });
+
+    store.reset();
+    fetchSongsIfChanged.mockRejectedValueOnce(new Error('signed out'));
+    fetchAlbumsIfChanged.mockRejectedValueOnce(new Error('signed out'));
+    answer(unchanged('s1'));
+    await refresh;
+    expect(store.songs).toEqual([]);
+    expect(store.error).toBe('signed out');
+
+    // A first load, spinner and all — the store does not believe it holds a library.
+    fetchSongs.mockResolvedValue([song(3)]);
+    fetchAlbums.mockResolvedValue([]);
+    store.revalidate();
+    expect(store.isLoading).toBe(true);
+    await flush();
+    expect(store.songs.map((s) => s.id)).toEqual([3]);
+  });
+
+  it('drops the songs validator when a row is changed here, so a refresh still overwrites it', async () => {
+    const { store } = await loadedStore();
+    store.notePlayed(1);
+    expect(store.songs[0].playCount).toBe(1);
+
+    // The server never heard of that play (a demo account's report is refused): the next refresh
+    // must bring its own count back, which "unchanged" would not.
+    fetchSongsIfChanged.mockResolvedValueOnce(rows([song(1, { playCount: 0 }), song(2)], 's1'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('a1'));
+    await store.loadSongs({ silent: true });
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith(null);
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({}, 'a1');
+    expect(store.songs[0].playCount).toBe(0);
+  });
+
+  it('asks again when a like landed while "unchanged" was on its way', async () => {
+    const { store } = await loadedStore();
+    let answer: (v: unknown) => void = () => {};
+    fetchSongsIfChanged.mockReturnValueOnce(new Promise((r) => (answer = r)));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('a1'));
+    const refresh = store.loadSongs({ silent: true });
+
+    likeSong.mockResolvedValue({ likedAtUtc: '2026-09-24T10:00:00Z' });
+    await store.toggleLike(2);
+    const sentAgain = [song(1), song(2, { likedAtUtc: '2026-09-24T10:00:00Z' })];
+    fetchSongsIfChanged.mockResolvedValueOnce(rows(sentAgain, 's2'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(rows([{ key: 'a' }], 'a2'));
+    answer(unchanged('s1'));
+    await refresh;
+
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith(null);
+    expect(store.songs).toBe(sentAgain);
+  });
+
+  it('asks again when another load replaced the rows while "unchanged" was on its way', async () => {
+    const { store } = await loadedStore();
+    let answer: (v: unknown) => void = () => {};
+    fetchSongsIfChanged.mockReturnValueOnce(new Promise((r) => (answer = r)));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('a1'));
+    const early = store.loadSongs({ silent: true });
+
+    // A second load, started later, finds the library changed and lands first.
+    const newer = [song(1), song(2), song(3)];
+    fetchSongsIfChanged.mockResolvedValueOnce(rows(newer, 's2'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('a1'));
+    await store.loadSongs({ silent: true });
+    expect(store.songs).toBe(newer);
+
+    // The early one's "unchanged" was about the rows that load just replaced.
+    const newest = [song(1), song(2), song(3), song(4)];
+    fetchSongsIfChanged.mockResolvedValueOnce(rows(newest, 's3'));
+    fetchAlbumsIfChanged.mockResolvedValueOnce(rows([{ key: 'a' }], 'a3'));
+    answer(unchanged('s1'));
+    await early;
+    expect(fetchSongsIfChanged).toHaveBeenLastCalledWith(null);
+    expect(store.songs).toBe(newest);
+  });
+
+  it('drops the cards validator when a like re-fetches the cards on their own', async () => {
+    const { store } = await loadedStore([song(1, { acquisitionIntent: 'AlbumFill' })]);
+    likeSong.mockResolvedValue({ likedAtUtc: '2026-09-24T10:00:00Z' });
+    fetchAlbums.mockResolvedValue([{ key: 'moved' }]);
+    await store.toggleLike(1);
+    await flush();
+    expect(store.albums).toEqual([{ key: 'moved' }]);
+
+    fetchSongs.mockResolvedValue([song(1)]);
+    await store.loadSongs({ silent: true });
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({}, null);
+  });
+
+  it('revalidates the detail cards with their own validator', async () => {
+    const detail = [{ key: 'a' }, { key: 'a2' }];
+    fetchAlbumsIfChanged.mockResolvedValueOnce(rows(detail, 'd1'));
+    const store = await freshStore();
+    store.ensureDetailAlbums();
+    await flush();
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({ builtOnly: false, merge: false }, null);
+
+    fetchAlbumsIfChanged.mockResolvedValueOnce(unchanged('d1'));
+    await store.reloadDetailAlbums();
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({ builtOnly: false, merge: false }, 'd1');
+    expect(store.detailAlbumsState).toBe('loaded');
+    expect(store.detailAlbums).toBe(detail);
+  });
+
+  it('leaves no detail cards behind when a sign-out crosses their "unchanged"', async () => {
+    fetchAlbumsIfChanged.mockResolvedValueOnce(rows([{ key: 'a' }], 'd1'));
+    const store = await freshStore();
+    store.ensureDetailAlbums();
+    await flush();
+
+    let answer: (v: unknown) => void = () => {};
+    fetchAlbumsIfChanged.mockReturnValueOnce(new Promise((r) => (answer = r)));
+    const refresh = store.reloadDetailAlbums();
+    store.reset();
+    answer(unchanged('d1'));
+    await refresh;
+
+    // Idle and empty — not "loaded" over nothing, which the panel would read as "not in your library".
+    expect(store.detailAlbumsState).toBe('idle');
+    expect(store.detailAlbums).toEqual([]);
+
+    store.ensureDetailAlbums();
+    expect(fetchAlbumsIfChanged).toHaveBeenLastCalledWith({ builtOnly: false, merge: false }, null);
+    await flush();
   });
 });
