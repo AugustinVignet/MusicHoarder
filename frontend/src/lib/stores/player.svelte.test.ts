@@ -632,6 +632,37 @@ describe('the position while a song plays', () => {
     });
   });
 
+  it('tells the lock screen where a stream reloaded in the background resumes, not the second last drawn', async () => {
+    const setPositionState = vi.fn();
+    vi.stubGlobal('MediaMetadata', class {});
+    vi.stubGlobal('navigator', {
+      audioSession,
+      mediaSession: { metadata: null, setActionHandler: () => {}, setPositionState }
+    });
+    const { playerStore, audio } = await playing();
+    audio.duration = 200;
+    audio.dispatchEvent(new Event('loadedmetadata'));
+    audio.currentTime = 5;
+    frames.draw(1000);
+
+    // The app leaves the screen five seconds in. No frame is drawn from here on, so 0:05 is the
+    // last position committed, while the song plays on for two minutes and then loses its stream.
+    doc.hidden = true;
+    audio.playFrom(125);
+    audio.fail(MEDIA_ERR_NETWORK);
+    vi.advanceTimersByTime(1000);
+    expect(audio.load).toHaveBeenCalledTimes(2);
+    audio.dispatchEvent(new Event('loadedmetadata'));
+
+    // The lock screen counts on from what it is told here, and it is the only place to see it.
+    expect(playerStore.currentTime).toBe(5);
+    expect(setPositionState).toHaveBeenLastCalledWith({
+      duration: 200,
+      position: 125,
+      playbackRate: 1
+    });
+  });
+
   it('stops with the song, and a pause shows the exact second it stopped at', async () => {
     const { playerStore, audio } = await playing();
     frames.draw(1000);

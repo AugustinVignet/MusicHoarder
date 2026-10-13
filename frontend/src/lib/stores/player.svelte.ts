@@ -313,13 +313,20 @@ function updateMediaMetadata(song: PlayerSong) {
   });
 }
 
+/**
+ * Tell the OS where the song is. The second comes off the element, not from the reactive
+ * `currentTime`: that one is committed by the position loop, which parks while the page is hidden,
+ * and the lock screen is exactly where this is read. A stream reloaded in the background would
+ * otherwise be reported at the second the app left the screen, and the OS counts on from there.
+ */
 function updatePositionState() {
   const ms = mediaSession();
   if (!ms?.setPositionState) return;
   if (!Number.isFinite(duration) || duration <= 0) return;
+  const position = audioEl?.currentTime ?? currentTime;
   ms.setPositionState({
     duration,
-    position: Math.min(Math.max(0, currentTime), duration),
+    position: Math.min(Math.max(0, position), duration),
     playbackRate: playbackRateState
   });
 }
