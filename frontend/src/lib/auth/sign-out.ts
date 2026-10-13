@@ -10,7 +10,7 @@
  */
 
 import { goto } from '$app/navigation';
-import { resetGrantors, signOut } from '$lib/api-client';
+import { resetFolderCovers, resetGrantors, signOut } from '$lib/api-client';
 import { APP_HOME } from '$lib/app-home';
 import { songsStore } from '$lib/stores/songs.svelte';
 import { playerStore } from '$lib/stores/player.svelte';
@@ -35,5 +35,6 @@ export async function signOutAndReset(allSessions = false): Promise<void> {
   playerStore.stop();
   chatStore.stop();
   resetGrantors();
+  resetFolderCovers();
   await goto('/login', { invalidateAll: true });
 }

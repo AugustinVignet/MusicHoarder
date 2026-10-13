@@ -47,16 +47,18 @@
     SORT_LABELS,
     SORT_MENU_LABELS,
     titleOf,
+    warmSearchCache,
     type ChipKey,
     type SortKey
   } from '$lib/track-list-view.svelte';
   import {
     ALBUM_SORT_OPTIONS,
     buildArtistGroups,
-    coverUrlForSong,
     fetchAlbumCanonicalStatuses,
     getArtistImageUrl,
     isAlbumSortKey,
+    rowCoverFallbackForSong,
+    rowCoverUrlForSong,
     sortAlbums,
     type AlbumSortKey,
     type AlbumStatusInfo,
@@ -580,7 +582,15 @@
 <!-- ── shared nav-bar pieces ─────────────────────────────────────────────── -->
 
 {#snippet searchField()}
-  <SearchField bind:value={query} label={SEARCH_LABEL[tab]} />
+  <!-- Tracks only: warm the search cache before typing starts, so the first keystroke only has
+       to assemble already-folded rows instead of folding all of them inside it (the Albums and
+       Artists grids are a few hundred rows, not thousands, so they cost nothing either way). -->
+  <SearchField
+    bind:value={query}
+    label={SEARCH_LABEL[tab]}
+    onfocus={tab === 'tracks' ? () => warmSearchCache(trackListBase) : undefined}
+    onpointerdown={tab === 'tracks' ? () => warmSearchCache(trackListBase) : undefined}
+  />
 {/snippet}
 
 {#snippet menuTrigger(label: string, glyph: 'sort' | 'filter')}
@@ -927,7 +937,8 @@
         <Cover
           artist={fallbackArtist(song)}
           title={song.album ?? titleOf(song)}
-          coverUrl={coverUrlForSong(song)}
+          coverUrl={rowCoverUrlForSong(song)}
+          fallbackUrl={rowCoverFallbackForSong(song)}
           size={48}
           corner={6}
           caption={false}
@@ -1123,7 +1134,11 @@
     border-radius: 1px;
     background: currentColor;
   }
+  /* As in TrackList: while it animates, a bar is full height and scaled from its foot, so the
+     animation runs on the compositor instead of laying the page out on every frame. */
   .mh-eq.is-playing > i {
+    height: 100%;
+    transform-origin: bottom;
     animation: mh-eq 0.9s ease-in-out infinite;
   }
   .mh-eq > i:nth-child(1) {
@@ -1138,14 +1153,15 @@
   @keyframes mh-eq {
     0%,
     100% {
-      height: 30%;
+      transform: scaleY(0.3);
     }
     50% {
-      height: 100%;
+      transform: scaleY(1);
     }
   }
   @media (prefers-reduced-motion: reduce) {
     .mh-eq.is-playing > i {
+      height: 35%;
       animation: none;
     }
   }

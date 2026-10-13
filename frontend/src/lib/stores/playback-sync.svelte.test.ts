@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiSong, PlaybackStreamHandlers } from '$lib/api-client';
+import { createPlaybackSnapshotStore } from '$lib/player-snapshot';
 import type { PlaybackSession, PlaybackStateReport } from '$lib/playback-sync/wire';
 
 /**
@@ -959,23 +960,20 @@ describe('a remembered session', () => {
 });
 
 describe('the reload restore', () => {
+  /** What the document before the reload left in the tab's storage. */
   function storeSnapshot() {
-    sessionStore.set(
-      'mh:playback',
-      JSON.stringify({
-        v: 1,
-        userId: 'u1',
-        queue: QUEUE,
-        queueIndex: 1,
-        position: 30,
-        wasPlaying: true,
-        volume: 1,
-        radioSeedId: 1,
-        radioExhausted: false,
-        miniPlayerDismissed: false,
-        savedAt: Date.now()
-      })
-    );
+    createPlaybackSnapshotStore(window.sessionStorage).write({
+      userId: 'u1',
+      queue: QUEUE,
+      queueIndex: 1,
+      position: 30,
+      wasPlaying: true,
+      volume: 1,
+      radioSeedId: 1,
+      radioExhausted: false,
+      miniPlayerDismissed: false,
+      savedAt: Date.now()
+    });
   }
 
   it('stays quiet while another device plays the session', async () => {

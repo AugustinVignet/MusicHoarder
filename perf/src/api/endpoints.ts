@@ -33,6 +33,12 @@ export interface Endpoint {
   viaProxy?: boolean
   /** Images and audio: no JSON breakdown, no gzip figure. */
   binary?: boolean
+  /**
+   * Time the request the way a client that already holds the answer sends it: ask once to learn
+   * the `ETag`, then measure with it in `If-None-Match`. The row is the 304, with no body — what
+   * finding out that nothing changed costs. Any other answer is reported as a failure.
+   */
+  revalidate?: boolean
 }
 
 const q = encodeURIComponent
@@ -41,6 +47,10 @@ export const ENDPOINTS: Endpoint[] = [
   { name: 'Session', group: 'Open the app', path: () => '/api/auth/me', budget: { p95Ms: 50 } },
   { name: 'Song list', group: 'Open the app', path: () => '/songs', viaProxy: true, budget: { p95Ms: 800, gzipBytes: 3_000_000 } },
   { name: 'Album cards', group: 'Open the app', path: () => '/api/albums', viaProxy: true, budget: { p95Ms: 300, gzipBytes: 500_000 } },
+  // A page visit with the library already loaded and nothing changed since: the web app sends back
+  // the tag each list came with. These only run their SQL on Postgres, so this is where it is run.
+  { name: 'Song list, unchanged', group: 'Open the app', path: () => '/songs?includeDeleted=false', revalidate: true, viaProxy: true, budget: { p95Ms: 60 } },
+  { name: 'Album cards, unchanged', group: 'Open the app', path: () => '/api/albums', revalidate: true, viaProxy: true, budget: { p95Ms: 60 } },
   { name: 'Playlists', group: 'Open the app', path: () => '/api/playlists', budget: { p95Ms: 150 } },
   { name: 'Playback session', group: 'Open the app', path: () => '/api/playback', budget: { p95Ms: 50 } },
   { name: 'Overview', group: 'Open the app', path: () => '/overview', budget: { p95Ms: 300 } },
@@ -48,6 +58,9 @@ export const ENDPOINTS: Endpoint[] = [
 
   // What the shell asks for on every document load to fill the Inbox badges and status rows.
   { name: 'Duplicate tracks', group: 'On every start, for the admin', path: () => '/api/library/duplicates', budget: { p95Ms: 200 } },
+  { name: 'Inbox name counts', group: 'On every start, for the admin', path: () => '/api/inbox/name-counts', budget: { p95Ms: 300 } },
+  // The three reports those two counts stand in for. Only the Inbox's Artist names and Album names
+  // pages ask for them now; they stay in this group so a run still lines up with the ones before it.
   { name: 'Duplicate albums', group: 'On every start, for the admin', path: () => '/api/library/albums/duplicates', budget: { p95Ms: 200 } },
   { name: 'Duplicate artists', group: 'On every start, for the admin', path: () => '/api/library/artists/duplicates', budget: { p95Ms: 200 } },
   { name: 'Split albums', group: 'On every start, for the admin', path: () => '/api/enrichment/split-albums', budget: { p95Ms: 200 } },

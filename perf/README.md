@@ -41,6 +41,11 @@ app, browsing, playing a track, then the admin pages. For every one:
 Large list responses also get a **bytes by field** breakdown, and a few requests are repeated
 through the frontend's `/api/mh` proxy to show what that hop adds.
 
+The two **unchanged** rows are the library lists asked for again with the `ETag` they came with,
+the way the web app revalidates on a page visit (`revalidate: true`): the row is the 304, and it
+fails if anything else comes back. They are also the only place that statement runs outside
+production, since the API's tests use an in-memory database.
+
 **Web app** (`src/web/bench.ts`), in headless Chromium, once per profile:
 
 - **Cold starts**: Overview, Albums, Tracks, Artists with an empty cache, timed until the page shows

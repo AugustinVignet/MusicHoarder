@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createPlaybackSnapshotStore } from '$lib/player-snapshot';
 import type { PlaybackSyncHooks, PlayerRemote, PlayerSong } from './player.svelte';
 
 /**
@@ -556,23 +557,20 @@ describe('localPlayback.adopt', () => {
 });
 
 describe('the reload restore', () => {
+  /** What the document before the reload left in the tab's storage. */
   function storeSnapshot(savedAt = Date.now()) {
-    session.set(
-      'mh:playback',
-      JSON.stringify({
-        v: 1,
-        userId: 'u1',
-        queue: QUEUE,
-        queueIndex: 1,
-        position: 30,
-        wasPlaying: true,
-        volume: 1,
-        radioSeedId: 1,
-        radioExhausted: false,
-        miniPlayerDismissed: false,
-        savedAt
-      })
-    );
+    createPlaybackSnapshotStore(window.sessionStorage).write({
+      userId: 'u1',
+      queue: QUEUE,
+      queueIndex: 1,
+      position: 30,
+      wasPlaying: true,
+      volume: 1,
+      radioSeedId: 1,
+      radioExhausted: false,
+      miniPlayerDismissed: false,
+      savedAt
+    });
   }
 
   it('waits for the gate, and stays quiet when another device is live', async () => {

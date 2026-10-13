@@ -21,7 +21,7 @@ public static class SongsEndpoints
 {
     public static IEndpointRouteBuilder MapSongsEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/songs", ListSongs).WithName("ListSongs");
+        app.MapGet("/songs", ListSongs).WithName("ListSongs").WithLibraryChangeEtag();
         app.MapGet("/songs/{id:int}/enrichment-detail", GetEnrichmentDetail)
             .WithName("GetEnrichmentDetail")
             .WithSummary("Dev: source vs current metadata + every provider attempt for one song.")
@@ -265,6 +265,13 @@ public static class SongsEndpoints
     /// <c>GET /songs/{id}/enrichment-detail</c>. Add a field here only when a list uses it:
     /// every field costs its name and value once per song.
     /// </para>
+    ///
+    /// <para>
+    /// The route answers <c>304</c> from <see cref="LibraryChangeStamp"/>, so everything read here
+    /// has to be something that stamp covers: a new table, option or parameter goes into the stamp
+    /// in the same change, and nothing may depend on the clock or the disk. Each read below says
+    /// which part of the stamp stands for it.
+    /// </para>
     /// </summary>
     internal static async Task<IResult> ListSongs(
         MusicHoarderDbContext db,
@@ -275,6 +282,8 @@ public static class SongsEndpoints
         bool includeDeleted = false,
         string? enrichmentStatus = null)
     {
+        // Stamp: every Songs row of the caller, deleted ones included. The two parameters reach the
+        // ETag through the query string.
         var query = db.Songs.AsNoTracking();
         if (!includeDeleted)
             query = query.Where(s => s.DeletedAtUtc == null);
@@ -289,6 +298,8 @@ public static class SongsEndpoints
         // track list and the album grid can never disagree about when a track arrived.
         var saveDates = await SpotifySaveDates.LoadAsync(db, ct);
 
+        // Stamp: both values are folded in. Read through the same IOptions<T> the stamp uses, so the
+        // two cannot see different values.
         var downloadDirectory = enricherOptions.Value.DownloadDirectory;
         var syncedSourceDirectory = syncOptions.Value.SyncedSourceDirectory;
 
@@ -378,7 +389,9 @@ public static class SongsEndpoints
                 // gates on and the share tracklist already uses, reached through the one-to-one nav so
                 // EF emits a LEFT JOIN on the unique IX_SongMusicVideos_SongId — no extra round-trip.
                 // Deliberately NOT VideoInfoDto.FileMissing: that needs a per-row File.Exists, which is
-                // not something to do thousands of times in a full-library listing.
+                // not something to do thousands of times in a full-library listing — and a file's
+                // presence is not a row version, so the list could no longer be answered with a 304.
+                // Stamp: the SongMusicVideos rows of the caller's songs.
                 HasMusicVideo = s.MusicVideo != null
                     && s.MusicVideo.Status == MusicVideoStatus.Ready
                     && s.MusicVideo.FilePath != null,
@@ -481,6 +494,8 @@ public static class SongsEndpoints
         // Anything shared with the caller, appended after their own rows. `includeDeleted` and
         // `enrichmentStatus` deliberately do not apply here — they are pipeline-triage filters over
         // rows you own, and ScopeSongs already excludes deleted, duplicate, and synthetic rows.
+        // Stamp: the grants, the grantors' names and songs, and the caller's listening state — see
+        // the reads inside the resolver and the projection.
         var scope = await scopeResolver.ResolveAsync(db, ct);
         var (sharedSongs, grantors) =
             await SharedSongProjection.BuildAsync(db, scope, scope.Slices[0].GrantorUserId, ct);
