@@ -275,6 +275,13 @@ async function measure(endpoint: Endpoint, sample: Sample, target: Target, optio
 
   let first: Timed
   try {
+    if (endpoint.revalidate) {
+      // One full answer to learn the tag; every request after it is the conditional one.
+      const learned = await timed(url, headers, false)
+      const etag = learned.headers.get('etag')
+      if (!etag) return { ...blank(endpoint, path, learned), error: `HTTP ${learned.status} with no ETag to send back` }
+      headers['if-none-match'] = etag
+    }
     first = await timed(url, headers, true)
   } catch (error) {
     first = { status: 0, ttfbMs: NaN, totalMs: NaN, bytes: 0, headers: new Headers(), body: null }
@@ -285,8 +292,13 @@ async function measure(endpoint: Endpoint, sample: Sample, target: Target, optio
     result.error = `HTTP ${first.status}`
     return result
   }
+  if (endpoint.revalidate && first.status !== 304) {
+    // Timing a full download under this name would hide that revalidation stopped working.
+    result.error = `HTTP ${first.status}, not the 304 an unchanged list should get`
+    return result
+  }
 
-  if (!endpoint.binary && first.body) {
+  if (!endpoint.binary && first.body && first.bytes > 0) {
     const decoded = decode(first.body, result.contentEncoding)
     result.decodedBytes = decoded.byteLength
     result.gzipBytes = result.contentEncoding ? first.bytes : Bun.gzipSync(decoded as Uint8Array<ArrayBuffer>).byteLength
