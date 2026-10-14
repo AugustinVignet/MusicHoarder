@@ -59,7 +59,12 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         // so a single on-disk album isn't split by inconsistent per-track enrichment. Track-level
         // fields below still come from the song.
         var compilation = albumIdentity.IsCompilation;
-        var albumArtists = compilation ? [VariousArtists] : BuildAlbumArtistArray(albumIdentity.AlbumArtist, song.Artist);
+        // Compilation also describes a single artist's anthology. Use the same VA decision as
+        // destination routing, while preserving the independent compilation flag in native tags.
+        var variousArtists = DestinationPathResolver.IsVariousArtists(compilation, albumIdentity.AlbumArtist);
+        var namedAlbumArtist = !string.IsNullOrWhiteSpace(albumIdentity.AlbumArtist)
+            && !DestinationPathResolver.IsVariousArtistsSentinel(albumIdentity.AlbumArtist);
+        var albumArtists = variousArtists ? [VariousArtists] : BuildAlbumArtistArray(albumIdentity.AlbumArtist, song.Artist);
 
         tag.Title = NullIfEmpty(song.Title);
         tag.Album = NullIfEmpty(albumIdentity.Album);
@@ -84,9 +89,12 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         SetIfPresent(NullIfEmpty(song.MusicBrainzId), v => tag.MusicBrainzTrackId = v);
         SetIfPresent(NullIfEmpty(albumIdentity.MusicBrainzReleaseId), v => tag.MusicBrainzReleaseId = v);
         SetIfPresent(NullIfEmpty(albumIdentity.MusicBrainzReleaseGroupId), v => tag.MusicBrainzReleaseGroupId = v);
-        SetIfPresent(
-            compilation ? VariousArtistsMbid : NullIfEmpty(albumIdentity.AlbumArtistMusicBrainzId),
-            v => tag.MusicBrainzReleaseArtistId = v);
+        var albumArtistMbid = variousArtists ? VariousArtistsMbid : NullIfEmpty(albumIdentity.AlbumArtistMusicBrainzId);
+        if (namedAlbumArtist && albumArtistMbid == VariousArtistsMbid) albumArtistMbid = null;
+        // Clear a stale VA identity on re-tag even when the real artist's MBID is unknown.
+        // Other absent IDs retain the existing conservative preserve-if-unknown behavior.
+        if (albumArtistMbid is not null || (namedAlbumArtist && tag.MusicBrainzReleaseArtistId == VariousArtistsMbid))
+            tag.MusicBrainzReleaseArtistId = albumArtistMbid ?? string.Empty;
         var artistIds = MusicHoarder.Api.Metadata.MultiValue.Split(song.ArtistMusicBrainzIds);
         SetIfPresent(artistIds.Length > 0 ? artistIds[0] : null, v => tag.MusicBrainzArtistId = v);
 
@@ -101,7 +109,9 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         tag.Copyright = NullIfEmpty(song.Copyright);
         // Sort names align positionally with the single-value display ARTIST / the album artist.
         tag.PerformersSort = NullIfEmpty(song.ArtistSort) is string artistSort ? [artistSort] : [];
-        var albumArtistSort = compilation ? VariousArtists : NullIfEmpty(song.AlbumArtistSort);
+        var albumArtistSort = variousArtists ? VariousArtists : NullIfEmpty(song.AlbumArtistSort);
+        if (namedAlbumArtist && albumArtistSort is not null && DestinationPathResolver.IsVariousArtistsSentinel(albumArtistSort))
+            albumArtistSort = null;
         tag.AlbumArtistsSort = albumArtistSort is null ? [] : [albumArtistSort];
 
         // Provisional (NeedsReview) tracks are built — when EnableBuildNeedsReview is on — but flagged so

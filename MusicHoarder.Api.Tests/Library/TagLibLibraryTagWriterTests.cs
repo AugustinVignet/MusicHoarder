@@ -170,7 +170,7 @@ public class TagLibLibraryTagWriterTests : IDisposable
         var path = CopyFixture("silence.mp3");
         var song = BasicSong();
         song.Artist = "Some Performer";
-        song.AlbumArtist = "Some Performer";
+        song.AlbumArtist = "Various Artists";
         song.IsCompilation = true;
 
         await new TagLibLibraryTagWriter().WriteTagsAsync(path, song, Identity(song));
@@ -375,14 +375,14 @@ public class TagLibLibraryTagWriterTests : IDisposable
     public async Task WriteTags_Compilation_DrivenByAlbumIdentity_NotSong()
     {
         // A single mis-enriched track (IsCompilation=false on the row) is still written as Various
-        // Artists when the elected album identity says the album is a compilation.
+        // Artists when the elected album identity identifies a genuine VA compilation.
         var path = CopyFixture("silence.mp3");
         var song = BasicSong();
         song.Artist = "Some Performer";
         song.AlbumArtist = "Some Performer";
         song.IsCompilation = false;
 
-        var identity = AlbumIdentity.FromSong(song) with { IsCompilation = true };
+        var identity = AlbumIdentity.FromSong(song) with { IsCompilation = true, AlbumArtist = "Various Artists" };
 
         await new TagLibLibraryTagWriter().WriteTagsAsync(path, song, identity);
 
@@ -392,6 +392,129 @@ public class TagLibLibraryTagWriterTests : IDisposable
         var tcmp = TagLib.Id3v2.TextInformationFrame.Get(id3, "TCMP", false);
         Assert.NotNull(tcmp);
         Assert.Equal(["1"], tcmp!.Text);
+    }
+
+    [Theory]
+    [InlineData("silence.mp3")]
+    [InlineData("silence.flac")]
+    [InlineData("silence.m4a")]
+    public async Task WriteTags_NamedArtistCompilation_PreservesAlbumIdentity(string fixture)
+    {
+        var path = CopyFixture(fixture);
+        var song = BasicSong();
+        song.AlbumArtistSort = "Album Artist, The";
+        var identity = Identity(song) with
+        {
+            IsCompilation = true,
+            AlbumArtist = "The Album Artist",
+            AlbumArtistMusicBrainzId = "named-album-artist-id",
+        };
+
+        await new TagLibLibraryTagWriter().WriteTagsAsync(path, song, identity);
+
+        using var file = TagLib.File.Create(path);
+        Assert.Equal(["The Album Artist"], file.Tag.AlbumArtists);
+        Assert.Equal(["Album Artist, The"], file.Tag.AlbumArtistsSort);
+        Assert.Equal("named-album-artist-id", file.Tag.MusicBrainzReleaseArtistId);
+        Assert.Equal(["An Artist"], file.Tag.Performers);
+        AssertCompilation(file);
+        AssertExtendedAlbumArtists(file, "The Album Artist");
+    }
+
+    [Theory]
+    [InlineData("silence.mp3", "Various Artists")]
+    [InlineData("silence.flac", "Various Artists")]
+    [InlineData("silence.m4a", "Various Artists")]
+    [InlineData("silence.mp3", "Verschiedene Interpreten")]
+    [InlineData("silence.flac", "Verschiedene Interpreten")]
+    [InlineData("silence.m4a", "Verschiedene Interpreten")]
+    [InlineData("silence.mp3", null)]
+    [InlineData("silence.flac", null)]
+    [InlineData("silence.m4a", null)]
+    public async Task WriteTags_GenuineCompilation_PreservesVariousArtists(string fixture, string? albumArtist)
+    {
+        var path = CopyFixture(fixture);
+        var song = BasicSong();
+        var identity = Identity(song) with { IsCompilation = true, AlbumArtist = albumArtist };
+
+        await new TagLibLibraryTagWriter().WriteTagsAsync(path, song, identity);
+
+        using var file = TagLib.File.Create(path);
+        Assert.Equal(["Various Artists"], file.Tag.AlbumArtists);
+        Assert.Equal(["Various Artists"], file.Tag.AlbumArtistsSort);
+        Assert.Equal("89ad4ac3-39f7-470e-963a-56509c546377", file.Tag.MusicBrainzReleaseArtistId);
+        AssertCompilation(file);
+        AssertExtendedAlbumArtists(file, "Various Artists");
+    }
+
+    [Theory]
+    [InlineData("silence.mp3", null)]
+    [InlineData("silence.flac", null)]
+    [InlineData("silence.m4a", null)]
+    [InlineData("silence.mp3", "89ad4ac3-39f7-470e-963a-56509c546377")]
+    [InlineData("silence.flac", "89ad4ac3-39f7-470e-963a-56509c546377")]
+    [InlineData("silence.m4a", "89ad4ac3-39f7-470e-963a-56509c546377")]
+    public async Task WriteTags_NamedArtistCompilation_ClearsStaleVariousArtistsIdentity(string fixture, string? artistMbid)
+    {
+        var path = CopyFixture(fixture);
+        using (var old = TagLib.File.Create(path))
+        {
+            old.Tag.AlbumArtists = ["Various Artists"];
+            old.Tag.AlbumArtistsSort = ["Various Artists"];
+            old.Tag.MusicBrainzReleaseArtistId = "89ad4ac3-39f7-470e-963a-56509c546377";
+            old.Save();
+        }
+        var song = BasicSong();
+        song.AlbumArtistSort = "Various Artists";
+        var identity = Identity(song) with { IsCompilation = true, AlbumArtistMusicBrainzId = artistMbid };
+
+        await new TagLibLibraryTagWriter().WriteTagsAsync(path, song, identity);
+
+        using var file = TagLib.File.Create(path);
+        Assert.Equal(["An Artist"], file.Tag.AlbumArtists);
+        Assert.Empty(file.Tag.AlbumArtistsSort);
+        Assert.True(string.IsNullOrEmpty(file.Tag.MusicBrainzReleaseArtistId));
+        AssertCompilation(file);
+    }
+
+    [Theory]
+    [InlineData("silence.mp3")]
+    [InlineData("silence.flac")]
+    [InlineData("silence.m4a")]
+    public async Task WriteTags_VariousArtistsWithoutCompilationFlag_PreservesExplicitIdentity(string fixture)
+    {
+        var path = CopyFixture(fixture);
+        var song = BasicSong();
+        song.AlbumArtist = "Various Artists";
+        song.AlbumArtistSort = "Various Artists";
+        song.AlbumArtistMusicBrainzId = "89ad4ac3-39f7-470e-963a-56509c546377";
+
+        await new TagLibLibraryTagWriter().WriteTagsAsync(path, song, Identity(song));
+
+        using var file = TagLib.File.Create(path);
+        Assert.Equal(["Various Artists"], file.Tag.AlbumArtists);
+        Assert.Equal(["Various Artists"], file.Tag.AlbumArtistsSort);
+        Assert.Equal("89ad4ac3-39f7-470e-963a-56509c546377", file.Tag.MusicBrainzReleaseArtistId);
+    }
+
+    private static void AssertCompilation(TagLib.File file)
+    {
+        if (file.GetTag(TagLib.TagTypes.Id3v2, false) is TagLib.Id3v2.Tag id3)
+            Assert.Equal(["1"], TagLib.Id3v2.TextInformationFrame.Get(id3, "TCMP", false)?.Text);
+        else if (file.GetTag(TagLib.TagTypes.Xiph, false) is TagLib.Ogg.XiphComment xiph)
+            Assert.Equal(["1"], xiph.GetField("COMPILATION"));
+        else
+            Assert.True(((TagLib.Mpeg4.AppleTag)file.GetTag(TagLib.TagTypes.Apple, false)).IsCompilation);
+    }
+
+    private static void AssertExtendedAlbumArtists(TagLib.File file, string expected)
+    {
+        if (file.GetTag(TagLib.TagTypes.Id3v2, false) is TagLib.Id3v2.Tag id3)
+            Assert.Equal([expected], TagLib.Id3v2.UserTextInformationFrame.Get(id3, "ALBUMARTISTS", false)?.Text);
+        else if (file.GetTag(TagLib.TagTypes.Xiph, false) is TagLib.Ogg.XiphComment xiph)
+            Assert.Equal([expected], xiph.GetField("ALBUMARTISTS"));
+        else
+            Assert.Equal([expected], ((TagLib.Mpeg4.AppleTag)file.GetTag(TagLib.TagTypes.Apple, false)).GetDashBoxes("com.apple.iTunes", "ALBUMARTISTS"));
     }
 
     [Fact]
