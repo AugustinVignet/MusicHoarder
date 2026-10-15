@@ -39,6 +39,7 @@ public interface IAlbumSplitHealer
     /// current election. Idempotent — a second pass over healed members elects the same identity and
     /// changes nothing. Corrections are reversible and never bump EnrichedAtUtc. First, it gives back
     /// album artists it once copied from a canonical album that turned out to be a different album.
+    /// Fields explicitly submitted in a still-current manual review retain their approved values.
     /// </summary>
     Task<AlbumSplitHealResult> HealAsync(CancellationToken ct = default);
 }
@@ -57,6 +58,7 @@ public sealed class AlbumSplitHealer(
         // Untracked copies: the restore and ApplyIdentityCorrection below mutate them to count would-be
         // changes with the exact heal logic, but nothing is saved.
         var songs = await QueryEligible().AsNoTracking().ToListAsync(ct);
+        await ManualReviewMetadata.LoadAsync(db, songs, ct);
         var canonicalAlbums = await LoadCanonicalAlbumsAsync(ct);
         var artistAliases = await ArtistAliasMap.LoadAsync(db, ct);
         var (restored, _) = await RestoreForeignAlbumArtistsAsync(songs, canonicalAlbums, DateTime.UtcNow, persist: false, ct);
@@ -105,6 +107,7 @@ public sealed class AlbumSplitHealer(
     public async Task<AlbumSplitHealResult> HealAsync(CancellationToken ct = default)
     {
         var songs = await QueryEligible().ToListAsync(ct);
+        await ManualReviewMetadata.LoadAsync(db, songs, ct);
         var canonicalAlbums = await LoadCanonicalAlbumsAsync(ct);
         var artistAliases = await ArtistAliasMap.LoadAsync(db, ct);
 
@@ -506,7 +509,8 @@ public sealed class AlbumSplitHealer(
                     && CanonicalAlbumMatch.SameArtist(credit, name, artistThreshold));
 
         var suspects = songs
-            .Where(s => !string.IsNullOrWhiteSpace(s.AlbumArtist)
+            .Where(s => !s.HasManualReviewValue(nameof(s.AlbumArtist))
+                && !string.IsNullOrWhiteSpace(s.AlbumArtist)
                 && IsForeign(s.Album, s.AlbumArtist!)
                 && !IsCredited(s, s.AlbumArtist!))
             .ToList();

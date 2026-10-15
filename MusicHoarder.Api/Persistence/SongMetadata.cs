@@ -233,7 +233,8 @@ public class SongMetadata
     public bool IsManuallyApproved { get; set; }
     public DateTime? ManuallyApprovedAtUtc { get; set; }
 
-    // Loaded from the current approval's audit rows by the builder; never a new database column.
+    // Loaded from the current approval's audit rows before building or automatic corrections;
+    // never a new database column. Only unchanged, still-current reviewed values are protected.
     [System.ComponentModel.DataAnnotations.Schema.NotMapped]
     internal IReadOnlyDictionary<string, string?> ManualReviewValues { get; set; } = new Dictionary<string, string?>();
 
@@ -671,6 +672,7 @@ public class SongMetadata
     /// or any grade, so it never triggers re-enrichment or an auto-regrade (grade staleness stays
     /// opt-in). Returns the field-level changes it made (empty when nothing changed) so the caller can
     /// record them in the change log.
+    /// Explicit fields of the current manual review are retained while their approved values still match.
     /// </summary>
     public IReadOnlyList<(string Field, string? OldValue, string? NewValue)> ApplyCanonicalCorrection(
         string? album, string? albumArtist, int? year, int? trackNumber, int? discNumber)
@@ -678,7 +680,8 @@ public class SongMetadata
         var changes = new List<(string, string?, string?)>();
         CaptureOriginalMetadata();
 
-        if (!string.IsNullOrWhiteSpace(album) && !string.Equals(album, Album, StringComparison.Ordinal))
+        if (!HasManualReviewValue(nameof(Album))
+            && !string.IsNullOrWhiteSpace(album) && !string.Equals(album, Album, StringComparison.Ordinal))
         {
             changes.Add((nameof(Album), Album, album));
             Album = album;
@@ -686,25 +689,26 @@ public class SongMetadata
 
         // Album-artist is an album-level field; a divergent per-track spelling (one provider's
         // "Lauryn Hill" vs another's "Ms. Lauryn Hill") splits the album across destination folders.
-        if (!string.IsNullOrWhiteSpace(albumArtist) && !string.Equals(albumArtist, AlbumArtist, StringComparison.Ordinal))
+        if (!HasManualReviewValue(nameof(AlbumArtist))
+            && !string.IsNullOrWhiteSpace(albumArtist) && !string.Equals(albumArtist, AlbumArtist, StringComparison.Ordinal))
         {
             changes.Add((nameof(AlbumArtist), AlbumArtist, albumArtist));
             AlbumArtist = albumArtist;
         }
 
-        if (year is > 0 && year != Year)
+        if (!HasManualReviewValue(nameof(Year)) && year is > 0 && year != Year)
         {
             changes.Add((nameof(Year), Year?.ToString(), year.Value.ToString()));
             Year = year;
         }
 
-        if (trackNumber is > 0 && trackNumber != TrackNumber)
+        if (!HasManualReviewValue(nameof(TrackNumber)) && trackNumber is > 0 && trackNumber != TrackNumber)
         {
             changes.Add((nameof(TrackNumber), TrackNumber?.ToString(), trackNumber.Value.ToString()));
             TrackNumber = trackNumber;
         }
 
-        if (discNumber is > 0 && discNumber != DiscNumber)
+        if (!HasManualReviewValue(nameof(DiscNumber)) && discNumber is > 0 && discNumber != DiscNumber)
         {
             changes.Add((nameof(DiscNumber), DiscNumber?.ToString(), discNumber.Value.ToString()));
             DiscNumber = discNumber;
@@ -730,6 +734,10 @@ public class SongMetadata
         Library.AlbumIdentity identity)
     {
         ArgumentNullException.ThrowIfNull(identity);
+
+        // Guard before mutating the row: the builder's per-track override only applies while
+        // the native value still equals the explicit value from the current approval.
+        identity = identity.WithManualReview(this);
 
         var changes = new List<(string, string?, string?)>();
         CaptureOriginalMetadata();

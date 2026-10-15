@@ -18,7 +18,8 @@ public interface ICanonicalAlbumConsolidator
     /// rewrites each owned song's album title/year and track/disc number from the canonical tracklist
     /// (matched by recording-MBID + fuzzy title, never by the owned — possibly corrupt — position),
     /// re-queuing already-built tracks so the next build relocates them into one folder with correct
-    /// numbers. Mutates tracked entities and records change-log rows but does NOT call SaveChanges —
+    /// numbers. Retains explicitly approved fields of the current manual review, including positions.
+    /// Mutates tracked entities and records change-log rows but does NOT call SaveChanges —
     /// the caller owns the unit of work. Returns <c>CanonicalFound=false</c> (no other side effects)
     /// when there is no canonical album, so the caller can fall back to a plain re-tag.
     /// </summary>
@@ -59,6 +60,8 @@ public sealed class CanonicalAlbumConsolidator(
 
         if (ownedSongs.Count == 0)
             return new CanonicalConsolidationResult(true, 0, 0, 0, 0);
+
+        await ManualReviewMetadata.LoadAsync(db, ownedSongs, ct);
 
         var orderedTracks = canonical.Tracks
             .OrderBy(t => t.DiscNumber)

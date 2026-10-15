@@ -1005,6 +1005,10 @@ public static class SongsEndpoints
             return Results.UnprocessableEntity(new { message = "Only an applied, not-yet-reverted change can be reverted." });
 
         SongFieldReverter.Apply(song, change.FieldName, change.OldValue);
+        // A metadata undo must reach the built copy as well as the row. Keep in-flight and
+        // unbuilt rows on their existing build path; only Done needs the force-retag signal.
+        if (song.LibraryBuildStatus == LibraryBuildStatus.Done)
+            song.RequeueForRetag();
         change.RevertedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync();
 
