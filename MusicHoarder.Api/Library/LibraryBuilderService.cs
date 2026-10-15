@@ -52,6 +52,7 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
     {
         ct.ThrowIfCancellationRequested();
 
+        albumIdentity = albumIdentity.WithManualReview(song);
         using var tagFile = OpenForTagging(path);
         var tag = tagFile.Tag;
 
@@ -195,7 +196,7 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         var barcode = SingleOrEmpty(song.Upc);
         // Full-precision release dates. A present value overrides the year-only DATE the generic Tag
         // already wrote; absent, we leave that year in place (never clear it back).
-        var releaseDate = NullIfEmpty(song.ReleaseDate);
+        var releaseDate = NullIfEmpty(ManualReviewMetadata.EffectiveReleaseDate(song));
         var originalDate = NullIfEmpty(song.OriginalReleaseDate);
         var originalYear = originalDate is not null
             ? MusicHoarder.Api.Metadata.ReleaseDateParser.ParseYear(originalDate)?.ToString()
@@ -433,6 +434,8 @@ public class LibraryBuilderService(
                 .OrderBy(s => s.Id)
                 .Take(opts.LibraryBuilderBatchSize)
                 .ToListAsync(ct);
+
+            await ManualReviewMetadata.LoadAsync(db, rawCandidates, ct);
 
             // Elect one canonical AlbumIdentity per LOGICAL album (keyed by the stable AlbumGroupKey, not
             // a folder path) over the FULL matched membership — BEFORE resolving destination paths. The
@@ -889,7 +892,8 @@ public class LibraryBuilderService(
         }
 
         var key = AlbumGroupKey.For(song);
-        return key is not null && identityByLogicalAlbum.TryGetValue(key, out var identity) ? identity : null;
+        return key is not null && identityByLogicalAlbum.TryGetValue(key, out var identity)
+            ? identity.WithManualReview(song) : null;
     }
 
     private async Task<LibraryBuildTrackResult> ProcessTrackAsync(
@@ -958,7 +962,8 @@ public class LibraryBuilderService(
 
         // No reconciled identity for this folder (reconciliation disabled, or an unreleased/loner
         // track): fall back to the song's own tags — exactly today's behavior.
-        var identity = albumIdentity ?? AlbumIdentity.FromSong(song);
+        await ManualReviewMetadata.LoadAsync(db, [song], ct);
+        var identity = (albumIdentity ?? AlbumIdentity.FromSong(song)).WithManualReview(song);
 
         var legacyPath = destinationPathResolver.ResolveLegacyPath(song);
         var currentManagedPath = ResolveCurrentManagedPath(song, destinationPath, legacyPath);

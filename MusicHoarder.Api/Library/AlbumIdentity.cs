@@ -23,6 +23,14 @@ public sealed record AlbumIdentity(
     string? MusicBrainzReleaseGroupId,
     string? AlbumArtistMusicBrainzId)
 {
+    /// <summary>Protect only fields explicitly submitted in this track's current approval.</summary>
+    internal AlbumIdentity WithManualReview(SongMetadata song) => this with
+    {
+        Album = song.HasManualReviewValue(nameof(song.Album)) ? song.Album : Album,
+        AlbumArtist = song.HasManualReviewValue(nameof(song.AlbumArtist)) ? song.AlbumArtist : AlbumArtist,
+        Year = song.HasManualReviewValue(nameof(song.Year)) ? song.Year : Year,
+    };
+
     /// <summary>
     /// The unharmonized identity straight off a single song — used when reconciliation is disabled
     /// or for a folder with no electable membership (e.g. unreleased singles). Reproduces the

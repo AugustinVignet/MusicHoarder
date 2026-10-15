@@ -8,4 +8,5 @@ public record ManualReviewRequest(
     string? Album = null,
     string? Title = null,
     int? Year = null,
-    int? TrackNumber = null);
+    int? TrackNumber = null,
+    int? DiscNumber = null);

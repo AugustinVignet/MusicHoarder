@@ -233,6 +233,14 @@ public class SongMetadata
     public bool IsManuallyApproved { get; set; }
     public DateTime? ManuallyApprovedAtUtc { get; set; }
 
+    // Loaded from the current approval's audit rows by the builder; never a new database column.
+    [System.ComponentModel.DataAnnotations.Schema.NotMapped]
+    internal IReadOnlyDictionary<string, string?> ManualReviewValues { get; set; } = new Dictionary<string, string?>();
+
+    internal bool HasManualReviewValue(string field) => IsManuallyApproved
+        && ManualReviewValues.TryGetValue(field, out var approved)
+        && string.Equals(approved, ManualReviewMetadata.CurrentValue(this, field), StringComparison.Ordinal);
+
     public bool OriginalMetadataCaptured { get; set; }
     public string? OriginalArtist { get; set; }
     public string? OriginalAlbumArtist { get; set; }
@@ -875,6 +883,7 @@ public class SongMetadata
     /// <summary>Locks the song's match so the pipeline won't touch it and resets can't undo it.</summary>
     public void LockManualApproval()
     {
+        ManualReviewValues = new Dictionary<string, string?>();
         IsManuallyApproved = true;
         ManuallyApprovedAtUtc = DateTime.UtcNow;
     }
@@ -882,6 +891,7 @@ public class SongMetadata
     /// <summary>Clears the manual-approval lock, allowing the pipeline to re-enrich it.</summary>
     public void UnlockManualApproval()
     {
+        ManualReviewValues = new Dictionary<string, string?>();
         IsManuallyApproved = false;
         ManuallyApprovedAtUtc = null;
     }

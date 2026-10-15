@@ -85,8 +85,10 @@ public sealed record WrittenTagSet(
     /// <summary>The tag set that will land on disk for <paramref name="song"/> under <paramref name="identity"/>.</summary>
     public static WrittenTagSet From(SongMetadata song, AlbumIdentity identity)
     {
+        identity = identity.WithManualReview(song);
         var compilation = identity.IsCompilation;
-        var albumArtist = compilation
+        var variousArtists = DestinationPathResolver.IsVariousArtists(compilation, identity.AlbumArtist);
+        var albumArtist = variousArtists
             ? VariousArtists
             : NullIfEmpty(identity.AlbumArtist) ?? NullIfEmpty(song.Artist);
 
@@ -112,7 +114,7 @@ public sealed record WrittenTagSet(
             ReleaseTypes: NullIfEmpty(identity.ReleaseTypes),
             IsCompilation: compilation ? "true" : "false",
             Genre: NullIfEmpty(song.Genre),
-            ReleaseDate: NullIfEmpty(song.ReleaseDate),
+            ReleaseDate: NullIfEmpty(ManualReviewMetadata.EffectiveReleaseDate(song)),
             OriginalReleaseDate: NullIfEmpty(song.OriginalReleaseDate),
             Label: NullIfEmpty(song.Label),
             CatalogNumber: NullIfEmpty(song.CatalogNumber),
@@ -121,7 +123,7 @@ public sealed record WrittenTagSet(
             Copyright: NullIfEmpty(song.Copyright),
             ArtistSort: NullIfEmpty(song.ArtistSort),
             // Mirror the writer: compilations sort under "Various Artists".
-            AlbumArtistSort: compilation ? VariousArtists : NullIfEmpty(song.AlbumArtistSort),
+            AlbumArtistSort: variousArtists ? VariousArtists : NullIfEmpty(song.AlbumArtistSort),
             Lyrics: HasLyrics(song) ? "present" : null);
     }
 

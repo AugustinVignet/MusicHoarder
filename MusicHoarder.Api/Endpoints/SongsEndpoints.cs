@@ -308,6 +308,7 @@ public static class SongsEndpoints
                 s.Title,
                 s.Year,
                 s.TrackNumber,
+                s.DiscNumber,
                 s.DurationSeconds,
                 s.DurationMs,
                 s.Bitrate,
@@ -342,6 +343,7 @@ public static class SongsEndpoints
                 s.OriginalTitle,
                 s.OriginalYear,
                 s.OriginalTrackNumber,
+                s.OriginalDiscNumber,
                 s.OriginalIsrc,
                 s.OriginalMusicBrainzId,
                 s.OriginalSpotifyId,
@@ -399,7 +401,7 @@ public static class SongsEndpoints
             {
             s.Id, s.SourcePath, s.FileName, s.Extension, s.FileSizeBytes,
             s.LastModifiedUtc, s.IndexedAtUtc, s.AcquiredAtUtc, s.DeletedAtUtc,
-            s.Artist, s.Artists, s.AlbumArtist, s.Album, s.Title, s.Year, s.TrackNumber,
+            s.Artist, s.Artists, s.AlbumArtist, s.Album, s.Title, s.Year, s.TrackNumber, s.DiscNumber,
             s.DurationSeconds, s.DurationMs,
             s.Bitrate,
             s.HasCoverArt,
@@ -416,7 +418,7 @@ public static class SongsEndpoints
                 .ToString(),
             s.EnrichedAtUtc, s.EnrichmentError,
             s.OriginalMetadataCaptured, s.OriginalArtist, s.OriginalAlbumArtist,
-            s.OriginalAlbum, s.OriginalTitle, s.OriginalYear, s.OriginalTrackNumber,
+            s.OriginalAlbum, s.OriginalTitle, s.OriginalYear, s.OriginalTrackNumber, s.OriginalDiscNumber,
             s.OriginalIsrc, s.OriginalMusicBrainzId, s.OriginalSpotifyId,
             s.OriginalMetadataCapturedAtUtc,
             s.IsDuplicate, s.DuplicateOfId,
@@ -1277,16 +1279,30 @@ public static class SongsEndpoints
             // already captured the file's originals.
             song.CaptureOriginalMetadata();
 
+            song.LockManualApproval();
+            foreach (var (field, value) in new (string Field, object? Value)[]
+            {
+                (nameof(song.Artist), request.Artist), (nameof(song.AlbumArtist), request.AlbumArtist),
+                (nameof(song.Album), request.Album), (nameof(song.Title), request.Title),
+                (nameof(song.Year), request.Year), (nameof(song.TrackNumber), request.TrackNumber),
+                (nameof(song.DiscNumber), request.DiscNumber),
+            })
+            {
+                if (value is not null)
+                    ManualReviewMetadata.Record(db, song, field, ManualReviewMetadata.CurrentValue(song, field),
+                        Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture));
+            }
+
             if (request.Artist is not null) song.Artist = request.Artist;
             if (request.Album is not null) song.Album = request.Album;
             if (request.Title is not null) song.Title = request.Title;
             if (request.Year.HasValue) song.Year = request.Year.Value;
             if (request.AlbumArtist is not null) song.AlbumArtist = request.AlbumArtist;
             if (request.TrackNumber.HasValue) song.TrackNumber = request.TrackNumber.Value;
+            if (request.DiscNumber.HasValue) song.DiscNumber = request.DiscNumber.Value;
 
             song.EnrichmentStatus = EnrichmentStatus.Matched;
             song.EnrichmentError = null;
-            song.LockManualApproval();
             song.ResetLibraryBuild();
         }
         else
@@ -1408,6 +1424,7 @@ public static class SongsEndpoints
             album = captured ? song.OriginalAlbum : song.Album,
             year = captured ? song.OriginalYear : song.Year,
             trackNumber = captured ? song.OriginalTrackNumber : song.TrackNumber,
+            discNumber = captured ? song.OriginalDiscNumber : song.DiscNumber,
             isrc = captured ? song.OriginalIsrc : song.Isrc,
             musicBrainzId = captured ? song.OriginalMusicBrainzId : song.MusicBrainzId,
             spotifyId = captured ? song.OriginalSpotifyId : song.SpotifyId,
@@ -1421,6 +1438,7 @@ public static class SongsEndpoints
             album = song.Album,
             year = song.Year,
             trackNumber = song.TrackNumber,
+            discNumber = song.DiscNumber,
             isrc = song.Isrc,
             musicBrainzId = song.MusicBrainzId,
             musicBrainzReleaseId = song.MusicBrainzReleaseId,
@@ -1539,6 +1557,7 @@ public static class SongsEndpoints
         AddIfChanged(diff, "album", s.OriginalAlbum, s.Album);
         AddIfChangedInt(diff, "year", s.OriginalYear, s.Year);
         AddIfChangedInt(diff, "trackNumber", s.OriginalTrackNumber, s.TrackNumber);
+        AddIfChangedInt(diff, "discNumber", s.OriginalDiscNumber, s.DiscNumber);
         AddIfChanged(diff, "isrc", s.OriginalIsrc, s.Isrc);
         AddIfChanged(diff, "musicBrainzId", s.OriginalMusicBrainzId, s.MusicBrainzId);
         AddIfChanged(diff, "spotifyId", s.OriginalSpotifyId, s.SpotifyId);

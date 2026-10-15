@@ -597,6 +597,41 @@ public class LibraryBuilderServiceTests
     }
 
     [Fact]
+    public async Task ProcessNextBatchAsync_ProtectsOnlyExplicitManualIdentity_WithoutChangingNeighbors()
+    {
+        var fileSystem = new MockFileSystem(new Dictionary<string, MockFileData>
+        {
+            ["/source/manual.mp3"] = new("aaaaa"),
+            ["/source/neighbor-a.mp3"] = new("bbbbb"),
+            ["/source/neighbor-b.mp3"] = new("ccccc"),
+        });
+        await using var db = CreateDbContext();
+        var reviewed = CreateMatchedSong("/source/manual.mp3", 5, title: "Reviewed", trackNumber: 1,
+            year: 2000, enrichmentStatus: EnrichmentStatus.NeedsReview);
+        var neighborA = CreateMatchedSong("/source/neighbor-a.mp3", 5, title: "Neighbor A", trackNumber: 2, year: 1990);
+        var neighborB = CreateMatchedSong("/source/neighbor-b.mp3", 5, title: "Neighbor B", trackNumber: 3, year: 1990);
+        db.Songs.AddRange(reviewed, neighborA, neighborB);
+        await db.SaveChangesAsync();
+        await MusicHoarder.Api.Endpoints.SongsEndpoints.ManualReviewTrack(reviewed.Id,
+            new MusicHoarder.Api.Contracts.ManualReviewRequest("approve", AlbumArtist: "Artist & Guest", Year: 2000, DiscNumber: 2), db);
+
+        var writer = new RecordingTagWriter();
+        var service = CreateService(db, fileSystem, writer);
+        var first = await service.ProcessNextBatchAsync(Guid.NewGuid());
+
+        Assert.Equal(3, first.Done);
+        Assert.Equal("Artist & Guest", writer.IdentityBySource[reviewed.SourcePath].AlbumArtist);
+        Assert.Equal(2000, writer.IdentityBySource[reviewed.SourcePath].Year);
+        foreach (var neighbor in new[] { neighborA, neighborB })
+        {
+            Assert.Equal("Artist", writer.IdentityBySource[neighbor.SourcePath].AlbumArtist);
+            Assert.Equal(1990, writer.IdentityBySource[neighbor.SourcePath].Year);
+        }
+        Assert.StartsWith("/dest/Artist & Guest/2000 - Album/", reviewed.DestinationPath!, StringComparison.Ordinal);
+        Assert.Equal(0, (await service.ProcessNextBatchAsync(Guid.NewGuid())).TotalTracks);
+    }
+
+    [Fact]
     public async Task ProcessNextBatchAsync_HarmonizesAlbumIdentity_AcrossTracksOfOneFolder()
     {
         // Two tracks of one album (same artist/album/year -> same folder) that enriched to DIFFERENT
