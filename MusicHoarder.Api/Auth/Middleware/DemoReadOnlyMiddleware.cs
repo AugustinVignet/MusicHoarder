@@ -67,7 +67,9 @@ public sealed class DemoReadOnlyMiddleware
             return;
         }
 
-        if (IsSafeMethod(context.Request.Method) || IsAllowlistedWrite(context.Request.Path.Value))
+        if (IsSafeMethod(context.Request.Method) || IsAllowlistedWrite(context.Request.Path.Value)
+            || (HttpMethods.IsPost(context.Request.Method)
+                && string.Equals(context.Request.Path.Value?.TrimEnd('/'), "/api/review/album-context", StringComparison.OrdinalIgnoreCase)))
         {
             await _next(context);
             return;
