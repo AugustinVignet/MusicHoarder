@@ -31,7 +31,7 @@ public static class LibraryBuildQuery
         bool buildNeedsReview = false, IQueryable<UpgradeRequest>? upgradeRequests = null)
     {
         var query = songs
-            .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic)
+            .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && s.ReviewPlanId == null)
             // Demo songs stream straight off their read-only mount (DestinationPath == SourcePath);
             // building one would copy it into the owner's library and try to prune the mount path.
             .ExcludingDemoTenant()

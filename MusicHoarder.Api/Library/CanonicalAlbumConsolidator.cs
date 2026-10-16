@@ -52,7 +52,7 @@ public sealed class CanonicalAlbumConsolidator(
         var artistLower = artist.ToLowerInvariant();
         var albumLower = album.ToLowerInvariant();
         var ownedSongs = await db.Songs
-            .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && !s.IsDuplicate)
+            .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && !s.IsDuplicate && s.ReviewPlanId == null)
             .Where(s => s.EnrichmentStatus == EnrichmentStatus.Matched)
             .Where(s => s.Album != null && s.Album.ToLower() == albumLower
                 && ((s.AlbumArtist ?? s.Artist) ?? "").ToLower() == artistLower)

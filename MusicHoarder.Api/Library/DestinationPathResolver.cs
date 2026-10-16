@@ -31,6 +31,7 @@ public class DestinationPathResolver(IOptions<MusicEnricherOptions> options) : I
     public string ResolvePath(SongMetadata song, AlbumIdentity? albumIdentity)
     {
         ArgumentNullException.ThrowIfNull(song);
+        albumIdentity = albumIdentity?.WithManualReview(song);
 
         var title = NormalizeSegment(song.Title, TitleFallback(song));
         var extension = NormalizeExtension(song.Extension);

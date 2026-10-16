@@ -24,11 +24,18 @@ public sealed record AlbumIdentity(
     string? AlbumArtistMusicBrainzId)
 {
     /// <summary>Protect only fields explicitly submitted in this track's current approval.</summary>
-    internal AlbumIdentity WithManualReview(SongMetadata song) => this with
+    internal AlbumIdentity WithManualReview(SongMetadata song) => song.ReviewPlanId.HasValue ? FromSong(song) : this with
     {
         Album = song.HasManualReviewValue(nameof(song.Album)) ? song.Album : Album,
         AlbumArtist = song.HasManualReviewValue(nameof(song.AlbumArtist)) ? song.AlbumArtist : AlbumArtist,
         Year = song.HasManualReviewValue(nameof(song.Year)) ? song.Year : Year,
+        IsCompilation = song.HasManualReviewValue(nameof(song.IsCompilation)) ? song.IsCompilation : IsCompilation,
+        TotalDiscs = song.HasManualReviewValue(nameof(song.TotalDiscs)) ? song.TotalDiscs : TotalDiscs,
+        ReleaseTypePrimary = song.HasManualReviewValue(nameof(song.ReleaseTypePrimary)) ? song.ReleaseTypePrimary : ReleaseTypePrimary,
+        ReleaseTypes = song.HasManualReviewValue(nameof(song.ReleaseTypes)) ? song.ReleaseTypes : ReleaseTypes,
+        MusicBrainzReleaseId = song.HasManualReviewValue(nameof(song.MusicBrainzReleaseId)) ? song.MusicBrainzReleaseId : MusicBrainzReleaseId,
+        MusicBrainzReleaseGroupId = song.HasManualReviewValue(nameof(song.MusicBrainzReleaseGroupId)) ? song.MusicBrainzReleaseGroupId : MusicBrainzReleaseGroupId,
+        AlbumArtistMusicBrainzId = song.HasManualReviewValue(nameof(song.AlbumArtistMusicBrainzId)) ? song.AlbumArtistMusicBrainzId : AlbumArtistMusicBrainzId,
     };
 
     /// <summary>

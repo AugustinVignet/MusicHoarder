@@ -296,7 +296,7 @@ public sealed class AlbumSplitHealer(
     // it — which fails on the read-only mount, and would destroy the source if it were ever writable.
     private IQueryable<SongMetadata> QueryEligible() => db.Songs
         .IgnoreQueryFilters()
-        .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic)
+        .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && s.ReviewPlanId == null)
         .ExcludingDemoTenant()
         .Where(s => !s.IsDuplicate && !s.IsUnreleased)
         .Where(s => s.EnrichmentStatus == EnrichmentStatus.Matched);

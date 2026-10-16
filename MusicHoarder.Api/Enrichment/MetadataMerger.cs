@@ -45,6 +45,7 @@ public static class MetadataMerger
         string? warningsJson,
         IReadOnlySet<string>? corroboratedFields = null)
     {
+        if (song.ReviewPlanId.HasValue) return [];
         song.CaptureOriginalMetadata();
 
         var highConsensus = agreeingProviderCount >= 2 && confidence >= autoUpgradeConfidence;

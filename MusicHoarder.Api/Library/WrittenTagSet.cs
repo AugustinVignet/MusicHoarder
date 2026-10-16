@@ -88,7 +88,7 @@ public sealed record WrittenTagSet(
         identity = identity.WithManualReview(song);
         var compilation = identity.IsCompilation;
         var variousArtists = DestinationPathResolver.IsVariousArtists(compilation, identity.AlbumArtist);
-        var albumArtist = variousArtists
+        var albumArtist = (song.ReviewPlanId.HasValue && string.IsNullOrEmpty(identity.AlbumArtist)) || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.AlbumArtist)) ? null : variousArtists
             ? VariousArtists
             : NullIfEmpty(identity.AlbumArtist) ?? NullIfEmpty(song.Artist);
 
@@ -98,7 +98,8 @@ public sealed record WrittenTagSet(
             Artist: TagLibLibraryTagWriter.BuildDisplayArtist(song.Artist),
             // Mirror the writer's ARTISTS resolution: the discrete list, else the ';'-join fallback
             // (a credit without ';' yields NO ARTISTS frame, hence null here).
-            Artists: NullIfEmpty(song.Artists) ?? (song.Artist?.Contains(';') == true ? NullIfEmpty(song.Artist) : null),
+            Artists: ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.Artists)) ? null
+                : NullIfEmpty(song.Artists) ?? (!song.ReviewPlanId.HasValue && song.Artist?.Contains(';') == true ? NullIfEmpty(song.Artist) : null),
             ArtistMusicBrainzIds: NullIfEmpty(song.ArtistMusicBrainzIds),
             AlbumArtist: albumArtist,
             Album: NullIfEmpty(identity.Album),
@@ -112,7 +113,7 @@ public sealed record WrittenTagSet(
             MusicBrainzReleaseGroupId: NullIfEmpty(identity.MusicBrainzReleaseGroupId),
             AlbumArtistMusicBrainzId: NullIfEmpty(identity.AlbumArtistMusicBrainzId),
             ReleaseTypes: NullIfEmpty(identity.ReleaseTypes),
-            IsCompilation: compilation ? "true" : "false",
+            IsCompilation: ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.IsCompilation)) ? null : compilation ? "true" : "false",
             Genre: NullIfEmpty(song.Genre),
             ReleaseDate: NullIfEmpty(ManualReviewMetadata.EffectiveReleaseDate(song)),
             OriginalReleaseDate: NullIfEmpty(song.OriginalReleaseDate),
@@ -123,7 +124,8 @@ public sealed record WrittenTagSet(
             Copyright: NullIfEmpty(song.Copyright),
             ArtistSort: NullIfEmpty(song.ArtistSort),
             // Mirror the writer: compilations sort under "Various Artists".
-            AlbumArtistSort: variousArtists ? VariousArtists : NullIfEmpty(song.AlbumArtistSort),
+            AlbumArtistSort: ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.AlbumArtistSort)) ? null
+                : variousArtists && !song.ReviewPlanId.HasValue ? VariousArtists : NullIfEmpty(song.AlbumArtistSort),
             Lyrics: HasLyrics(song) ? "present" : null);
     }
 
