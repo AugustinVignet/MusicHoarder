@@ -1753,9 +1753,11 @@ public class LibraryBuilderServiceTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ReviewPlan_HoldsCurrentAndPreviousCopy_AgainstABetterAutomaticCandidate(bool previous)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task ReviewPlan_HoldsCurrentAndPreviousCopy_AgainstABetterAutomaticCandidate(bool previous, bool automationHold)
     {
         var destination = "/dest/Artist/2026 - Album/01 - Track.mp3";
         var fs = new MockFileSystem(new Dictionary<string, MockFileData>
@@ -1764,7 +1766,7 @@ public class LibraryBuilderServiceTests
         });
         await using var db = CreateDbContext();
         var held = CreateMatchedSong("/source/old.mp3", 8, libraryBuildStatus: LibraryBuildStatus.AwaitingReviewBuild, year: 1990);
-        held.ReviewPlanId = Guid.NewGuid(); held.IsManuallyApproved = true;
+        held.ReviewPlanId = automationHold ? null : Guid.NewGuid(); held.AutomationHeld = automationHold; held.IsManuallyApproved = true;
         held.DestinationPath = previous ? "/dest/retained-other.mp3" : destination;
         held.PreviousDestinationPath = previous ? destination : null;
         var candidate = CreateMatchedSong("/source/new.mp3", 13);

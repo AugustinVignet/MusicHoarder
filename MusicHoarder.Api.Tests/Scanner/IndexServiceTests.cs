@@ -127,14 +127,16 @@ public class IndexServiceTests : IDisposable
         Assert.Equal(acquired, row.AcquiredAtUtc);        // but the acquisition time stands still
     }
 
-    [Fact]
-    public async Task ReviewPlan_ReindexRecordsChangedSourceFacts_WithoutReplacingApprovedMetadataOrCopies()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReviewPlan_ReindexRecordsChangedSourceFacts_WithoutReplacingApprovedMetadataOrCopies(bool automationHold)
     {
         var path = Path.Combine(tempDir, "track.mp3"); await File.WriteAllBytesAsync(path, [1, 2, 3]);
         await using var db = NewContext(); var reviewed = Seed(path.Replace('\\', '/'));
         reviewed.FileSizeBytes = 999; reviewed.Title = "Reviewed title"; reviewed.Year = null;
         reviewed.EnrichmentStatus = EnrichmentStatus.Matched; reviewed.IsManuallyApproved = true;
-        reviewed.ManuallyApprovedAtUtc = DateTime.UtcNow; reviewed.ReviewPlanId = Guid.NewGuid();
+        reviewed.ManuallyApprovedAtUtc = DateTime.UtcNow; reviewed.ReviewPlanId = automationHold ? null : Guid.NewGuid(); reviewed.AutomationHeld = automationHold;
         reviewed.LibraryBuildStatus = LibraryBuildStatus.AwaitingReviewBuild;
         reviewed.DestinationPath = "/retained/current.mp3"; reviewed.PreviousDestinationPath = "/retained/previous.mp3";
         db.Songs.Add(reviewed); await db.SaveChangesAsync();

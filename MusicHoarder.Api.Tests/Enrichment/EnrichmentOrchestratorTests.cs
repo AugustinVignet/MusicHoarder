@@ -14,6 +14,39 @@ namespace MusicHoarder.Api.Tests.Enrichment;
 public class EnrichmentOrchestratorTests
 {
     [Fact]
+    public async Task AutomationHold_BlocksNativeProviders_ButAnExplicitTargetedStageCanRun()
+    {
+        await using var db = CreateDb(); var calls = 0;
+        var song = AddPendingSong(db, artist: "Example Ensemble", title: "Example Movement");
+        song.AutomationHeld = true; await db.SaveChangesAsync();
+        var provider = new StubEnrichmentProvider("AcoustID", 100, _ => true,
+            _ => { calls++; return Task.FromResult<ProviderOutcome>(new ProviderNoMatch()); });
+        var service = CreateOrchestratorWithProviders(db, [provider]);
+        Assert.Equal(EnrichmentOutcome.Skipped, await service.ProcessSongAsync(song.Id)); Assert.Equal(0, calls);
+        await service.ProcessTargetedSongAsync(song.Id, true, default);
+        Assert.Equal(1, calls); Assert.True((await db.Songs.SingleAsync()).AutomationHeld);
+    }
+
+    [Fact]
+    public async Task UnqualifiedFingerprint_TargetedNameIdentificationExcludesAcoustId_AndKeepsQualityWarning()
+    {
+        await using var db = CreateDb(); var fingerprintCalls = 0; var nameCalls = 0;
+        var song = AddPendingSong(db, artist: "Example Ensemble", title: "Example Movement");
+        song.AutomationHeld = true;
+        db.PipelineStageStates.Add(new() { SongId = song.Id, OwnerUserId = song.OwnerUserId, Stage = "fingerprint",
+            State = "qualificationRequired", SourceWarningCode = "fpcalc_nonzero_exit", Attempts = 1, UpdatedAtUtc = DateTime.UtcNow });
+        await db.SaveChangesAsync();
+        var acoustId = new StubEnrichmentProvider("AcoustID", 100, _ => true,
+            _ => { fingerprintCalls++; return Task.FromResult<ProviderOutcome>(new ProviderNoMatch()); });
+        var spotify = new StubEnrichmentProvider("SpotifyAPI", 200, _ => true,
+            _ => { nameCalls++; return Task.FromResult<ProviderOutcome>(new ProviderNoMatch()); });
+        var options = CreateOptions(); options.Value.EnableSpotifyApiProvider = true;
+        await CreateOrchestratorWithProviders(db, [acoustId, spotify], options).ProcessTargetedSongAsync(song.Id, false, default);
+        Assert.Equal(0, fingerprintCalls); Assert.Equal(1, nameCalls);
+        Assert.Equal("fpcalc_nonzero_exit", (await db.PipelineStageStates.SingleAsync()).SourceWarningCode);
+    }
+
+    [Fact]
     public async Task ProcessSong_AcoustIdSolo_CleanUnambiguousMatch_SetsMatched()
     {
         // A clean, unambiguous fingerprint match is acoustically authoritative: once it's the only

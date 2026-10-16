@@ -136,3 +136,11 @@ Required test environment: disposable local MH_REVIEW_TEST_POSTGRES, ffmpeg and
 ffprobe, MH_TEST_FPCALC or fpcalc on PATH. Record missing-tool skips. Exact Linux
 and Production image/native-auth acceptance remain independent; record actual
 fpcalc/decoder versions rather than assuming this development host's versions.
+
+Development validation on 2026-10-17: a clean Release rebuild and the complete API
+suite executed 3,603 cases on macOS arm64, .NET 10.0.402, PostgreSQL 14.17,
+ffmpeg/ffprobe 7.1.1 and private fpcalc 1.6.2. 3,602 passed, one pre-existing
+macOS Web Push key-rejection test failed, zero skipped. All 61 added D cases and
+the 67 C cases, including both B-R1 checkpoints, passed. Production-mode HTTP uses
+a fixture principal and simulated providers; native authentication and the exact
+Linux Production image still require independent acceptance.
