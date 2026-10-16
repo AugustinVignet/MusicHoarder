@@ -47,10 +47,16 @@ public static class AlbumReviewEndpoints
         {
             // One coherent database snapshot; filesystem observations are separately qualified.
             // No SaveChanges, provider, job queue or builder is reachable from this reader.
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
-            await db.Database.ExecuteSqlRawAsync("SET TRANSACTION READ ONLY", ct);
-            var result = await AlbumReviewContextReader.ReadAsync(db, files, user.UserId, request, ct);
-            await transaction.CommitAsync(ct);
+            // Aspire enables Npgsql retries. The strategy must own the entire transaction,
+            // including disposal, so a transient failure restarts a fresh snapshot.
+            var result = await db.Database.CreateExecutionStrategy().ExecuteAsync(async token =>
+            {
+                await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, token);
+                await db.Database.ExecuteSqlRawAsync("SET TRANSACTION READ ONLY", token);
+                var packet = await AlbumReviewContextReader.ReadAsync(db, files, user.UserId, request, token);
+                await transaction.CommitAsync(token);
+                return packet;
+            }, ct);
             return Results.Ok(result);
         }
         catch (AlbumReviewReadException e) { return Results.Json(e.Error, statusCode: e.StatusCode); }

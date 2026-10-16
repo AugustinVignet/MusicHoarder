@@ -1,4 +1,6 @@
 using System.Net.Http.Json;
+using System.Data;
+using System.Data.Common;
 using System.IO.Abstractions;
 using System.Reflection;
 using System.Text.Json;
@@ -8,8 +10,10 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Hosting;
 using MusicHoarder.Api.Auth;
 using MusicHoarder.Api.Auth.Middleware;
 using MusicHoarder.Api.Contracts;
@@ -30,6 +34,45 @@ public sealed class AlbumReviewContextTests
 {
     private static readonly DateTime Stamp = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
     private static readonly TestCurrentUserAccessor Owner = new(TestCurrentUserAccessor.OwnerUser);
+
+    [PostgresFact]
+    public async Task ProductionRetryStrategy_ReplaysWholeReadOnlySnapshot_WithoutWrites_AndHonorsCancellation()
+    {
+        await using var store = await TestDatabase.CreateAsync();
+        store.Db.Songs.Add(Song(1, "/source/album"));
+        await store.Db.SaveChangesAsync();
+        var before = await Snapshot(store.Db);
+        var probe = new RetrySnapshotProbe();
+        await using var db = new MusicHoarderDbContext(new DbContextOptionsBuilder()
+            .UseNpgsql(store.ConnectionString, pg => pg.EnableRetryOnFailure())
+            .AddInterceptors(probe).Options, Owner);
+        Assert.True(db.Database.CreateExecutionStrategy().RetriesOnFailure);
+        probe.Armed = true;
+
+        var packet = await Read(db, new(["/source/album"]));
+
+        probe.Armed = false;
+        Assert.Single(packet.Tracks);
+        Assert.True(probe.InjectedTransientFailure);
+        Assert.Equal(2, probe.ReadOnlySetCount);
+        Assert.True(probe.Snapshots.Count >= 2);
+        Assert.All(probe.Snapshots, s =>
+        {
+            Assert.Equal(IsolationLevel.RepeatableRead, s.Isolation);
+            Assert.Equal("on", s.ReadOnly);
+        });
+        Assert.Null(db.Database.CurrentTransaction);
+        Assert.Empty(db.ChangeTracker.Entries());
+        Assert.Equal(packet.Revision, (await Read(db, new(["/source/album"]))).Revision);
+        Assert.Equal(before, await Snapshot(store.Db));
+
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => AlbumReviewEndpoints.ReadContext(
+            new(["/source/album"]), db, Owner, new FileSystem(), cancelled.Token));
+        Assert.Null(db.Database.CurrentTransaction);
+        Assert.Equal(before, await Snapshot(store.Db));
+    }
 
     [PostgresTheory]
     [InlineData(null, 1, false, "possibleAlbumPosition")]
@@ -316,14 +359,19 @@ public sealed class AlbumReviewContextTests
         await using var store = await TestDatabase.CreateAsync();
         store.Db.Songs.Add(Song(1, "/source/program"));
         await store.Db.SaveChangesAsync();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = Environments.Production });
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Logging.ClearProviders();
-        builder.Services.AddScoped(_ => new MusicHoarderDbContext(new DbContextOptionsBuilder().UseNpgsql(store.ConnectionString).Options, Owner));
+        // The production Program uses this registration + Aspire enrichment, which enables retries.
+        builder.Services.AddDbContext<MusicHoarderDbContext>(options => options.UseNpgsql(store.ConnectionString));
+        builder.EnrichNpgsqlDbContext<MusicHoarderDbContext>();
         builder.Services.AddSingleton<ICurrentUserAccessor>(Owner);
         builder.Services.AddSingleton<IFileSystem, FileSystem>();
         builder.Services.AddOpenApi();
         await using var app = builder.Build();
+        using (var scope = app.Services.CreateScope())
+            Assert.True(scope.ServiceProvider.GetRequiredService<MusicHoarderDbContext>()
+                .Database.CreateExecutionStrategy().RetriesOnFailure);
         app.MapAlbumReviewEndpoints();
         app.MapOpenApi();
         await app.StartAsync();
@@ -418,7 +466,8 @@ public sealed class AlbumReviewContextTests
             }
             config.Database = name;
             config.Pooling = false;
-            var db = new MusicHoarderDbContext(new DbContextOptionsBuilder().UseNpgsql(config.ConnectionString).Options);
+            var db = new MusicHoarderDbContext(new DbContextOptionsBuilder()
+                .UseNpgsql(config.ConnectionString, pg => pg.EnableRetryOnFailure()).Options);
             try { await db.Database.EnsureCreatedAsync(); }
             catch { await db.DisposeAsync(); throw; }
             return new() { Db = db, ConnectionString = config.ConnectionString, AdminConnection = admin, Name = name };
@@ -430,6 +479,43 @@ public sealed class AlbumReviewContextTests
             await conn.OpenAsync();
             await using var cmd = new NpgsqlCommand($"DROP DATABASE {Name} WITH (FORCE)", conn);
             await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    private sealed class RetrySnapshotProbe : DbCommandInterceptor
+    {
+        public bool Armed { get; set; }
+        public bool InjectedTransientFailure { get; private set; }
+        public int ReadOnlySetCount { get; private set; }
+        public List<(IsolationLevel Isolation, string ReadOnly)> Snapshots { get; } = [];
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Armed && command.CommandText == "SET TRANSACTION READ ONLY") ReadOnlySetCount++;
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Armed)
+            {
+                Assert.NotNull(command.Transaction);
+                using var check = command.Connection!.CreateCommand();
+                check.Transaction = command.Transaction;
+                check.CommandText = "SELECT current_setting('transaction_read_only')";
+                var readOnly = (string)(await check.ExecuteScalarAsync(cancellationToken))!;
+                Snapshots.Add((command.Transaction.IsolationLevel, readOnly));
+                if (!InjectedTransientFailure)
+                {
+                    InjectedTransientFailure = true;
+                    throw new NpgsqlException("Synthetic transient read failure", new TimeoutException("Synthetic timeout"));
+                }
+            }
+            return await base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
         }
     }
 }

@@ -125,6 +125,13 @@ no-tracking queries and explicit owner checks on all rows/references. Admins do
 not bypass ownership. The POST is narrowly allowed through member/demo guards
 because it is a read; mutation verbs and descendant routes remain denied.
 
+The complete transaction (begin, READ ONLY, evidence reads, commit and disposal)
+runs inside the configured EF execution strategy. Aspire's production Npgsql
+retries remain enabled. A transient failure retries the whole read in a new
+snapshot, without combining evidence across attempts; cancellation is forwarded
+to the strategy and every database operation. Typed selection/limit errors are
+preserved. No metadata mutation or build is retried by this read endpoint.
+
 `revision` is a deterministic SHA-256 over the owner and returned scope/evidence excluding
 `observedAtUtc` and the revision itself. A change to a neighbor, candidate,
 audit, program or measured copy signature changes the revision. Identical
@@ -150,6 +157,11 @@ The test connection must have `Database=mh_review_test` and a local socket or
 loopback host. Each test creates/drops its own random `mh_review_test_*` database.
 Never use the real instance connection string. Do not start production Program,
 workers, Compose, a provider, or mount music for these tests.
+All PostgreSQL fixtures enable Npgsql retries. The HTTP host runs in Production
+and uses the same AddDbContext/EnrichNpgsqlDbContext composition as Program for
+connection resiliency, without production workers. An injected transient read
+failure verifies two complete READ ONLY snapshots, preserved isolation/revision,
+no writes, disposed transactions and cancellation.
 
 ```sh
 export MH_REVIEW_TEST_POSTGRES='Host=/TEMP/pgsocket;Database=mh_review_test;Username=TEST_USER'
