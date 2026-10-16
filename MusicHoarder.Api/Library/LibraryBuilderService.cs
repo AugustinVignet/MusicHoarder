@@ -69,6 +69,7 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
             || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.AlbumArtist)) ? []
             : variousArtists ? [VariousArtists] : BuildAlbumArtistArray(albumIdentity.AlbumArtist, song.Artist);
 
+        if (song.ReviewPlanId.HasValue) albumArtists = SingleOrEmpty(song.AlbumArtist);
         tag.Title = NullIfEmpty(song.Title);
         tag.Album = NullIfEmpty(albumIdentity.Album);
         // Singular ARTIST is the DISPLAY credit (Navidrome uses it as the display name when the
@@ -213,6 +214,7 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
             SetId3UserText(id3, "ARTISTS", artists);
             SetId3UserText(id3, "ALBUMARTISTS", albumArtists);
             SetId3UserText(id3, "MusicBrainz Album Type", releaseTypes);
+            if (song.ReviewPlanId.HasValue) SetId3UserText(id3, "RELEASETYPE_PRIMARY", SingleOrEmpty(song.ReleaseTypePrimary));
             SetId3Text(id3, "TCMP", compilation ? ["1"] : []);
             if (song.ReviewPlanId.HasValue || alignedArtistIds.Length > 0 || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.ArtistMusicBrainzIds))) SetId3UserText(id3, "MusicBrainz Artist Id", alignedArtistIds);
             SetId3Text(id3, "TPUB", label);                       // publisher / label
@@ -228,8 +230,10 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         if (file.GetTag(TagLib.TagTypes.Xiph, false) is TagLib.Ogg.XiphComment xiph)
         {
             SetXiph(xiph, "ARTISTS", artists);
+            if (song.ReviewPlanId.HasValue) SetXiph(xiph, "ISRC", SingleOrEmpty(song.Isrc));
             SetXiph(xiph, "ALBUMARTISTS", albumArtists);
             SetXiph(xiph, "RELEASETYPE", releaseTypes);
+            if (song.ReviewPlanId.HasValue) SetXiph(xiph, "RELEASETYPE_PRIMARY", SingleOrEmpty(song.ReleaseTypePrimary));
             SetXiph(xiph, "COMPILATION", compilation ? ["1"] : []);
             if (song.ReviewPlanId.HasValue || alignedArtistIds.Length > 0 || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.ArtistMusicBrainzIds))) SetXiph(xiph, "MUSICBRAINZ_ARTISTID", alignedArtistIds);
             SetXiph(xiph, "LABEL", label);
@@ -249,6 +253,15 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
             SetDash(apple, "ARTISTS", artists);
             SetDash(apple, "ALBUMARTISTS", albumArtists);
             SetDash(apple, "MusicBrainz Album Type", releaseTypes);
+            if (song.ReviewPlanId.HasValue)
+            {
+                SetDash(apple, "RELEASETYPE_PRIMARY", SingleOrEmpty(song.ReleaseTypePrimary));
+                SetDash(apple, "RELEASEDATE", SingleOrEmpty(releaseDate));
+                SetDash(apple, "MusicBrainz Track Id", SingleOrEmpty(song.MusicBrainzId));
+                SetDash(apple, "MusicBrainz Album Id", SingleOrEmpty(song.MusicBrainzReleaseId));
+                SetDash(apple, "MusicBrainz Release Group Id", SingleOrEmpty(song.MusicBrainzReleaseGroupId));
+                SetDash(apple, "MusicBrainz Album Artist Id", SingleOrEmpty(song.AlbumArtistMusicBrainzId));
+            }
             if (ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.IsCompilation))) apple.SetData("cpil", Array.Empty<TagLib.Mpeg4.AppleDataBox>());
             else apple.IsCompilation = compilation;
             if (song.ReviewPlanId.HasValue || alignedArtistIds.Length > 0 || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.ArtistMusicBrainzIds))) SetDash(apple, "MusicBrainz Artist Id", alignedArtistIds);
@@ -931,7 +944,9 @@ public class LibraryBuilderService(
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MusicHoarderDbContext>();
 
+        await using var writeGuard = await Review.Copy.ReviewWriteGuard.AcquireAsync(db, wait: true, ct);
         var song = await db.Songs.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.Id == songId, ct);
+        if (song is not null) await db.Entry(song).ReloadAsync(ct);
         if (song is null)
         {
             // Row vanished between the batch snapshot and here (only soft-delete is used, so this is rare).
@@ -980,8 +995,14 @@ public class LibraryBuilderService(
                     || (s.ReviewPlanId != null && s.PreviousDestinationPath == destinationPath)))
             .Select(s => (int?)s.Id)
             .FirstOrDefaultAsync(ct);
-        if (occupantId is { } occupant)
+        var foldedPath = destinationPath.ToLowerInvariant();
+        var retainedByReview = await db.ReviewCopyTracks.AnyAsync(t => t.SongId != songId
+            && (t.DestinationPath.ToLower() == foldedPath || t.BackupPath.ToLower() == foldedPath
+                || t.OldDestinationPath != null && t.OldDestinationPath.ToLower() == foldedPath
+                || t.OldPreviousPath != null && t.OldPreviousPath.ToLower() == foldedPath), ct);
+        if (occupantId is not null || retainedByReview)
         {
+            var occupant = occupantId ?? 0;
             logger.LogWarning(
                 "Refusing to build song {SongId} over {DestinationPath}: song {OccupantId} still holds that file",
                 songId, destinationPath, occupant);
@@ -1065,6 +1086,7 @@ public class LibraryBuilderService(
             // One overwrite-move rather than delete-then-move: for a released row re-tagged in place
             // the destination is the only copy of the audio, and a crash between a delete and the
             // move would lose it. Temp lives in the destination folder, so this is a plain rename.
+            await writeGuard!.CheckAsync(ct);
             fileSystem.File.Move(tempPath, destinationPath, overwrite: true);
             if (!string.IsNullOrWhiteSpace(song.PreviousDestinationPath)
                 && !PathsEqual(song.PreviousDestinationPath, destinationPath))

@@ -14,7 +14,7 @@ internal sealed record ReviewAudioProof(string Version, string ContentSha256, lo
 internal sealed record ReviewAudioResult(bool Verified, string? FailedStage, string? FailureCode,
     ReviewAudioProof? Source, ReviewAudioProof? Candidate, bool SourceCacheHit, bool CandidateCacheHit);
 
-/// <summary>The future durable job store supplies this cache. A content hash alone is never a
+/// <summary>The durable job store supplies this cache. A content hash alone is never a
 /// proof: the matching verifier/tool version and complete successful checks are required.</summary>
 internal interface IReviewAudioProofStore
 {

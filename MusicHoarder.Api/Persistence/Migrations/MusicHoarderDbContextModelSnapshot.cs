@@ -1256,6 +1256,170 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.ToTable("PlaylistEntries");
                 });
 
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.ReviewAudioCacheEntry", b =>
+                {
+                    b.Property<string>("Version")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ContentSha256")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProofJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Version", "ContentSha256");
+
+                    b.ToTable("ReviewAudioCache");
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.ReviewCopyJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("OwnerUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PlanId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Revision")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("RolledBackAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PlanId")
+                        .IsUnique();
+
+                    b.HasIndex("OwnerUserId", "RequestId")
+                        .IsUnique();
+
+                    b.HasIndex("State", "CreatedAtUtc");
+
+                    b.ToTable("ReviewCopyJobs");
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.ReviewCopyRequestKey", b =>
+                {
+                    b.Property<Guid>("OwnerUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PlanId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Revision")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("OwnerUserId", "RequestId");
+
+                    b.HasIndex("JobId");
+
+                    b.ToTable("ReviewCopyRequestKeys");
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.ReviewCopyTrack", b =>
+                {
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("SongId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("AfterJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("BackupPath")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("BeforeJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("CandidateSha256")
+                        .HasColumnType("text");
+
+                    b.Property<string>("DestinationBeforeSha256")
+                        .HasColumnType("text");
+
+                    b.Property<string>("DestinationPath")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("FailureCode")
+                        .HasColumnType("text");
+
+                    b.Property<string>("FailureStage")
+                        .HasColumnType("text");
+
+                    b.Property<string>("OldDestinationPath")
+                        .HasColumnType("text");
+
+                    b.Property<string>("OldPreviousPath")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProofJson")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("PublishedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("SourcePath")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("SourceSha256")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("StagingPath")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("JobId", "SongId");
+
+                    b.HasIndex("SongId", "State");
+
+                    b.ToTable("ReviewCopyTracks");
+                });
+
             modelBuilder.Entity("MusicHoarder.Api.Persistence.ReviewPlan", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2829,6 +2993,33 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.Navigation("Song");
                 });
 
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.ReviewCopyJob", b =>
+                {
+                    b.HasOne("MusicHoarder.Api.Persistence.ReviewPlan", null)
+                        .WithMany()
+                        .HasForeignKey("PlanId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.ReviewCopyRequestKey", b =>
+                {
+                    b.HasOne("MusicHoarder.Api.Persistence.ReviewCopyJob", null)
+                        .WithMany()
+                        .HasForeignKey("JobId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.ReviewCopyTrack", b =>
+                {
+                    b.HasOne("MusicHoarder.Api.Persistence.ReviewCopyJob", null)
+                        .WithMany("Tracks")
+                        .HasForeignKey("JobId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("MusicHoarder.Api.Persistence.ShareVisit", b =>
                 {
                     b.HasOne("MusicHoarder.Api.Persistence.SongShare", "Share")
@@ -3016,6 +3207,11 @@ namespace MusicHoarder.Api.Persistence.Migrations
             modelBuilder.Entity("MusicHoarder.Api.Persistence.Playlist", b =>
                 {
                     b.Navigation("Entries");
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.ReviewCopyJob", b =>
+                {
+                    b.Navigation("Tracks");
                 });
 
             modelBuilder.Entity("MusicHoarder.Api.Persistence.SongMetadata", b =>

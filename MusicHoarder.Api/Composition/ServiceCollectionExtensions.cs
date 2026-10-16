@@ -268,6 +268,10 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ILibraryTagWriter, TagLibLibraryTagWriter>();
         services.AddScoped<ILibraryDestinationCleaner, LibraryDestinationCleaner>();
         services.AddScoped<ILibraryBuilderService, LibraryBuilderService>();
+        services.AddScoped<Review.Copy.IReviewAudioCommandRunner>(sp => new Review.Copy.ReviewAudioCommandRunner(
+            sp.GetRequiredService<IOptions<MusicEnricherOptions>>().Value.FfmpegPath));
+        services.AddScoped<Review.Copy.ReviewCopyProcessor>();
+        services.AddHostedService<Review.Copy.ReviewCopyBackgroundService>();
         services.AddScoped<IPipelinePurgeService, PipelinePurgeService>();
 
         // Demo seeder runs first so its data is in place before background workers (which are

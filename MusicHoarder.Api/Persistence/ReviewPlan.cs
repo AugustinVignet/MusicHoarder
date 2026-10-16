@@ -1,6 +1,6 @@
 namespace MusicHoarder.Api.Persistence;
 
-/// <summary>Immutable preview plus a metadata application receipt. No copy job is implied.
+/// <summary>Immutable preview plus a metadata application receipt. C links its durable copy job atomically.
 /// Request/snapshot/preview contain only the bounded owner-authorized album context.</summary>
 public sealed class ReviewPlan
 {

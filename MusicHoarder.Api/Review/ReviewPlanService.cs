@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using MusicHoarder.Api.Contracts;
 using MusicHoarder.Api.Library;
+using MusicHoarder.Api.Review.Copy;
 using MusicHoarder.Api.Persistence;
 
 namespace MusicHoarder.Api.Review;
@@ -16,7 +17,7 @@ internal sealed class ReviewPlanException(int statusCode, ReviewPlanError error)
     internal ReviewPlanError Error { get; } = error;
 }
 
-/// <summary>Exact metadata plans. No provider, consolidator, queue or file writer is reachable here.
+/// <summary>Exact metadata plans with a transactionally linked targeted copy outbox; no provider or copy writer here.
 /// PostgreSQL retries own the entire serializable transaction, including disposal and reload.</summary>
 internal static class ReviewPlanService
 {
@@ -57,8 +58,14 @@ internal static class ReviewPlanService
             ?? throw Error(404, "plan_not_found", "Plan unavailable to this owner."));
 
     internal static Task<ReviewPlanResult> ApplyAsync(MusicHoarderDbContext db, IFileSystem files,
-        IDestinationPathResolver resolver, Guid owner, Guid id, string revision, CancellationToken ct)
-        => db.Database.CreateExecutionStrategy().ExecuteAsync(async token =>
+        IDestinationPathResolver resolver, Guid owner, Guid id, string revision, CancellationToken ct, Guid? requestId = null)
+    {
+        return ApplyGuardedAsync();
+        async Task<ReviewPlanResult> ApplyGuardedAsync()
+        {
+        await using var guard = await ReviewWriteGuard.AcquireAsync(db, wait: false, ct)
+            ?? throw Error(409, "writer_busy", "A library writer is active. Retry Apply after it finishes; nothing was applied.");
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async token =>
         {
             db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, token);
@@ -68,7 +75,29 @@ internal static class ReviewPlanService
                 throw Error(409, "plan_revision_changed", "Supply the exact immutable preview revision.");
             var request = JsonSerializer.Deserialize<ReviewPlanRequest>(plan.RequestJson, Json)!;
             var ids = request.Tracks.Select(t => t.SongId).Order().ToArray();
-            if (plan.AppliedAtUtc is not null) return new ReviewPlanResult(id, revision, "metadataApplied", ids, CopyState);
+            var key = requestId ?? id;
+            var keyed = await db.ReviewCopyRequestKeys.SingleOrDefaultAsync(j => j.OwnerUserId == owner && j.RequestId == key, token);
+            if (keyed is not null && (keyed.PlanId != id || keyed.Revision != revision))
+                throw Error(409, "request_key_reused", "This request key belongs to different content.");
+            var existingJob = await db.ReviewCopyJobs.SingleOrDefaultAsync(j => j.OwnerUserId == owner && j.PlanId == id, token);
+            if (existingJob is not null)
+            {
+                if (existingJob.State is "rolledBack" or "rollingBack")
+                    throw Error(409, "plan_rolled_back", "Prepare a new plan after rollback.");
+                if (keyed is null)
+                {
+                    db.ReviewCopyRequestKeys.Add(new() { OwnerUserId = owner, RequestId = key, PlanId = id, Revision = revision, JobId = existingJob.Id });
+                    await db.SaveChangesAsync(token); await tx.CommitAsync(token);
+                }
+                return new ReviewPlanResult(id, revision, "metadataApplied", ids, CopyState, existingJob.Id);
+            }
+            if (plan.AppliedAtUtc is not null)
+            {
+                var adopted = await ReviewCopyJobs.EnqueueAsync(db, files, plan, ReadPreview(plan), key, token);
+                await db.SaveChangesAsync(token);
+                await tx.CommitAsync(token);
+                return new ReviewPlanResult(id, revision, "metadataApplied", ids, CopyState, adopted.Id);
+            }
             var before = JsonSerializer.Deserialize<AlbumReviewContext>(plan.ContextJson, Json)!;
             AlbumReviewContext current;
             try { current = await AlbumReviewContextReader.ReadAsync(db, files, owner, request.Scope, token); }
@@ -87,6 +116,7 @@ internal static class ReviewPlanService
             var songs = await db.Songs.Where(s => s.OwnerUserId == owner && s.DeletedAtUtc == null && ids.Contains(s.Id)).ToListAsync(token);
             if (songs.Count != ids.Length) throw Error(409, "plan_stale", "A selected track is unavailable.");
             await ManualReviewMetadata.LoadAsync(db, songs, token);
+            var originals = songs.ToDictionary(s => s.Id, ReviewCopyJobs.Snapshot);
             foreach (var song in songs)
             {
                 var patch = request.Tracks.Single(t => t.SongId == song.Id);
@@ -112,6 +142,7 @@ internal static class ReviewPlanService
                 }
                 // Even an approve-only plan has a durable receipt (ReviewPlans). No invented field audit.
                 song.ManualReviewValues = approved;
+                if (patch.PreserveAlbumMembership) song.ClearDuplicate();
                 song.ReviewPlanId = id;
                 song.EnrichmentStatus = EnrichmentStatus.Matched;
                 song.EnrichmentError = null;
@@ -119,10 +150,14 @@ internal static class ReviewPlanService
                 // Keep current AND previous copies and all historical build facts until stage C verifies replacements.
             }
             plan.AppliedAtUtc = DateTime.UtcNow;
+            var job = await ReviewCopyJobs.EnqueueAsync(db, files, plan, preview, key, token, originals);
+            await guard.CheckAsync(token);
             await db.SaveChangesAsync(token);
             await tx.CommitAsync(token);
-            return new ReviewPlanResult(id, revision, "metadataApplied", ids, CopyState);
+            return new ReviewPlanResult(id, revision, "metadataApplied", ids, CopyState, job.Id);
         }, ct);
+        }
+    }
 
     private static async Task<ReviewPlanPreview> BuildPreview(MusicHoarderDbContext db, IFileSystem files,
         IDestinationPathResolver resolver, Guid owner, Guid id, ReviewPlanRequest request,
@@ -143,6 +178,8 @@ internal static class ReviewPlanService
                 throw Error(400, "invalid_track_state", "Plans accept real Matched or NeedsReview tracks only.");
             if (song.EnrichmentStatus == EnrichmentStatus.NeedsReview && !patch.Approve)
                 throw Error(400, "approval_required", "NeedsReview tracks require an explicit approval.");
+            if (song.IsDuplicate && !patch.PreserveAlbumMembership)
+                throw Error(400, "membership_decision_required", "Explicitly preserve this album membership before building a duplicate-marked track.");
             var before = ReviewFields.Values(song);
             foreach (var (field, value) in patch.Fields) ReviewFields.Set(song, field, ReviewFields.Parse(field, value));
             ReviewFields.Validate(song, patch.Fields.Keys.ToHashSet(StringComparer.Ordinal));
@@ -183,18 +220,44 @@ internal static class ReviewPlanService
                 values[field] = value.ValueKind == JsonValueKind.Null ? null : ReviewFields.Get(song, field);
             return t with { Current = t.Current with { Values = values }, Copy = t.Copy with { Path = paths[t.Id] } };
         }).ToArray();
-        var conflicts = AlbumReviewContextReader.Conflicts(final).ToList();
+        var conflicts = AlbumReviewContextReader.Conflicts(final).Select(conflict =>
+        {
+            if (conflict.Kind is not ("albumPosition" or "possibleAlbumPosition")) return conflict;
+            var members = songs.Where(s => conflict.SongIds.Contains(s.Id)).ToArray();
+            var separatePaths = members.Select(s => paths[s.Id]).Distinct(StringComparer.OrdinalIgnoreCase).Count() == members.Length;
+            var allDismissed = members.All(a => members.Where(b => b.Id != a.Id).All(b => context.Duplicates.Any(d =>
+                d.Status == "Dismissed" && (d.SongIdLow == Math.Min(a.Id, b.Id) && d.SongIdHigh == Math.Max(a.Id, b.Id)))));
+            if (separatePaths && allDismissed) return conflict with { Kind = "distinctTakesRetained" };
+            var separateEditions = members.All(s => !string.IsNullOrEmpty(s.MusicBrainzReleaseId))
+                && members.Select(s => s.MusicBrainzReleaseId).Distinct().Count() == members.Length
+                && members.Select(s => files.Path.GetDirectoryName(paths[s.Id])).Distinct(StringComparer.OrdinalIgnoreCase).Count() == members.Length;
+            return separateEditions ? conflict with { Kind = "distinctEditionsRetained" } : conflict;
+        }).ToList();
         var observations = tracks.SelectMany(t => new[] { t.PlannedPath, songs.Single(s => s.Id == t.SongId).SourcePath })
             .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Select(p => AlbumReviewContextReader.ObserveFile(files, p)).ToArray();
         foreach (var track in tracks)
         {
             var observation = observations.Single(o => o.Path == track.PlannedPath);
             if (observation.Presence != "missing" && !context.Tracks.Any(t => t.Id == track.SongId
-                && string.Equals(t.Copy.Path, track.PlannedPath, StringComparison.Ordinal)))
+                && (string.Equals(t.Copy.Path, track.PlannedPath, StringComparison.Ordinal)
+                    || string.Equals(t.Copy.Path, track.PlannedPath, StringComparison.OrdinalIgnoreCase)
+                        && files.File.Exists(t.Copy.Path!)
+                        && ReviewCopyJobs.HashIfPresent(files, t.Copy.Path!) == ReviewCopyJobs.HashIfPresent(files, track.PlannedPath))))
                 conflicts.Add(new("destinationOccupiedOrUnknown", track.PlannedPath, [track.SongId]));
         }
+        var fingerprints = tracks.SelectMany(t => new[] { t.PlannedPath, songs.Single(s => s.Id == t.SongId).SourcePath,
+                songs.Single(s => s.Id == t.SongId).DestinationPath, songs.Single(s => s.Id == t.SongId).PreviousDestinationPath })
+            .Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p!).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)
+            .Select(p =>
+            {
+                try { var hash = ReviewCopyJobs.HashIfPresent(files, p); return new ReviewPlanFileFingerprint(p, hash is null ? "missing" : "present", hash); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return new ReviewPlanFileFingerprint(p, "unavailable", null); }
+            }).ToArray();
+        if (fingerprints.Any(f => f.Presence == "unavailable"))
+            conflicts.Add(new("fileFingerprintUnavailable", "selectedFiles", request.Tracks.Select(t => t.SongId).ToArray()));
         var preview = new ReviewPlanPreview(id, "", context.Revision, tracks, contextIds, conflicts,
-            !conflicts.Any(c => c.SongIds.Any(s => request.Tracks.Any(t => t.SongId == s))), CopyState, observations, "exact-metadata-v1");
+            !conflicts.Any(c => c.Kind is not ("distinctTakesRetained" or "distinctEditionsRetained")
+                && c.SongIds.Any(s => request.Tracks.Any(t => t.SongId == s))), CopyState, observations, "exact-verified-copy-v2", fingerprints);
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new { request, preview }, Json);
         if (bytes.Length > AlbumReviewContextReader.MaxResponseBytes)
             throw Error(413, "plan_limit", "Plan exceeds the byte budget; no partial preview was stored.");
@@ -243,7 +306,7 @@ internal static class ReviewPlanService
             || r.EvidenceReferences.Any(e => string.IsNullOrWhiteSpace(e) || e.Length > 1024 || e.Any(char.IsControl))
             || r.Tracks is null || r.Tracks.Length is < 1 or > AlbumReviewContextReader.MaxTracks
             || r.Tracks.Any(t => t is null || t.SongId <= 0 || t.Fields is null || t.Fields.Count > ReviewFields.Names.Length
-                || (!t.Approve && t.Fields.Count == 0)) || r.Tracks.Select(t => t.SongId).Distinct().Count() != r.Tracks.Length)
+                || (!t.Approve && !t.PreserveAlbumMembership && t.Fields.Count == 0)) || r.Tracks.Select(t => t.SongId).Distinct().Count() != r.Tracks.Length)
             throw Error(400, "invalid_plan", "Supply a bounded scope/revision, reason, 1..16 proof references and 1..200 unique explicit track changes or approvals.");
         foreach (var track in r.Tracks) foreach (var (name, value) in track.Fields) ReviewFields.Parse(name, value);
     }
