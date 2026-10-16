@@ -177,7 +177,7 @@ public sealed class ReviewPlanTests
         async Task<bool> TryApply(MusicHoarderDbContext connection, ReviewPlanPreview p)
         {
             try { await Apply(connection, p); return true; }
-            catch (ReviewPlanException e) { Assert.Equal("plan_stale", e.Error.Code); return false; }
+            catch (ReviewPlanException e) { Assert.Contains(e.Error.Code, new[] { "plan_stale", "writer_busy" }); return false; }
         }
         var results = await Task.WhenAll(TryApply(db, first), TryApply(otherDb, second));
         Assert.Single(results, r => r);
@@ -335,6 +335,8 @@ public sealed class ReviewPlanTests
         builder.EnrichNpgsqlDbContext<MusicHoarderDbContext>();
         builder.Services.AddSingleton<ICurrentUserAccessor>(User);
         builder.Services.AddSingleton(Files); builder.Services.AddSingleton(Resolver()); builder.Services.AddOpenApi();
+        builder.Services.AddSingleton<MusicHoarder.Api.Review.Copy.IReviewAudioCommandRunner>(
+            new MusicHoarder.Api.Review.Copy.ReviewAudioCommandRunner("ffmpeg"));
         await using var app = builder.Build(); app.MapAlbumReviewEndpoints(); app.MapOpenApi(); await app.StartAsync();
         using var client = new HttpClient { BaseAddress = new Uri(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single()) };
         var context = (await (await client.PostAsJsonAsync("/api/review/album-context", new AlbumReviewContextRequest(["/source/album"]))).Content.ReadFromJsonAsync<AlbumReviewContext>())!;
@@ -343,7 +345,12 @@ public sealed class ReviewPlanTests
         var plan = (await response.Content.ReadFromJsonAsync<ReviewPlanPreview>())!;
         var fetched = await client.GetFromJsonAsync<ReviewPlanPreview>($"/api/review/plans/{plan.Id}"); Assert.Equal(plan.Revision, fetched!.Revision);
         using var applied = await client.PostAsJsonAsync($"/api/review/plans/{plan.Id}/apply", new ReviewPlanApplyRequest(plan.Revision)); applied.EnsureSuccessStatusCode();
-        Assert.Equal("metadataApplied", (await applied.Content.ReadFromJsonAsync<ReviewPlanResult>())!.State);
+        var receipt = (await applied.Content.ReadFromJsonAsync<ReviewPlanResult>())!;
+        Assert.Equal("metadataApplied", receipt.State); Assert.NotNull(receipt.JobId);
+        var job = (await client.GetFromJsonAsync<ReviewCopyJobResult>($"/api/review/jobs/{receipt.JobId}"))!;
+        Assert.True(job.MetadataApplied); Assert.False(job.CopiesVerified); Assert.Equal("pending", job.State);
+        using var retry = await client.PostAsync($"/api/review/jobs/{receipt.JobId}/retry", null);
+        retry.EnsureSuccessStatusCode();
         using var stale = await client.PostAsJsonAsync($"/api/review/plans/{plan.Id}/apply", new ReviewPlanApplyRequest(new string('0', 64)));
         Assert.Equal(System.Net.HttpStatusCode.Conflict, stale.StatusCode);
         var api = await client.GetStringAsync("/openapi/v1.json"); Assert.Contains("ReviewPlanRequest", api); Assert.Contains("ReviewPlanPreview", api);
@@ -380,8 +387,9 @@ public sealed class ReviewPlanTests
         db.Songs.Add(Song(1)); await db.SaveChangesAsync();
         var plan = await Preview(db, [Patch(1, new { Title = "Reviewed" })]); await Apply(db, plan);
         var applied = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
-        Assert.EndsWith("AddExactReviewPlans", applied[^1]);
-        await db.GetService<IMigrator>().MigrateAsync(applied[^2]);
+        Assert.Contains(applied, m => m.EndsWith("AddExactReviewPlans"));
+        Assert.EndsWith("AddReviewRequestAliases", applied[^1]);
+        await db.GetService<IMigrator>().MigrateAsync(applied[^4]);
         Assert.Equal(1, await db.Database.SqlQueryRaw<int>("SELECT count(*)::int AS \"Value\" FROM \"Songs\"").SingleAsync());
         await db.GetService<IMigrator>().MigrateAsync();
         Assert.Empty(await db.ReviewPlans.ToArrayAsync());

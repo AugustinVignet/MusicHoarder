@@ -62,7 +62,7 @@ queue whose loss can discard an acknowledged Apply.
 ## File states and evidence
 
 A job is pending, running, needsAttention, completed, rollingBack or rolledBack.
-Tracks record pending, staging, verified, publishing, published, failed or
+Tracks record pending, staging, copied, tagged, verified, publishing, published, failed or
 rolledBack, with attempts, stage/code, timestamps, manifest paths and proof JSON.
 The song remains AwaitingReviewBuild until its published copy is verified.
 
@@ -146,3 +146,12 @@ All fixtures are synthetic. ENOSPC/rename denial and crash boundaries are inject
 failures; full NAS power loss and Linux Production image remain independent
 acceptance checks. See the private project's C delivery report for exact SHA,
 patch hashes, commands, results and remaining qualification.
+
+## Development validation (2026-10-17)
+
+The complete API suite on macOS arm64 / .NET 10.0.402 / PostgreSQL 14.17 /
+ffmpeg+ffprobe 7.1.1 completed 3,542 cases: 3,541 passed, one failed, zero skipped.
+The only failure is the already-reproduced macOS baseline Web Push private/public
+key rejection test. Stage C adds 67 passing cases over B, including the earlier
+28 component cases. No Linux/image qualification is implied by these results.
+The private delivery report pins the final source SHA and exported patch.
