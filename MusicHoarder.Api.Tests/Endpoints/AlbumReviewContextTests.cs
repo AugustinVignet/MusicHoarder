@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.IO.Abstractions;
+using System.Reflection;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -13,6 +14,8 @@ using MusicHoarder.Api.Auth;
 using MusicHoarder.Api.Auth.Middleware;
 using MusicHoarder.Api.Contracts;
 using MusicHoarder.Api.Endpoints;
+using MusicHoarder.Api.Library;
+using MusicHoarder.Api.Options;
 using MusicHoarder.Api.Persistence;
 using MusicHoarder.Api.Review;
 using MusicHoarder.Api.Tests.Auth;
@@ -27,6 +30,75 @@ public sealed class AlbumReviewContextTests
 {
     private static readonly DateTime Stamp = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
     private static readonly TestCurrentUserAccessor Owner = new(TestCurrentUserAccessor.OwnerUser);
+
+    [PostgresTheory]
+    [InlineData(null, 1, false, "possibleAlbumPosition")]
+    [InlineData(1, null, false, "possibleAlbumPosition")]
+    [InlineData(null, null, false, "possibleAlbumPosition")]
+    [InlineData(1, 1, false, "albumPosition")]
+    [InlineData(2, 2, false, "albumPosition")]
+    [InlineData(1, 2, false, null)]
+    [InlineData(null, 2, false, null)]
+    [InlineData(null, 1, true, null)]
+    [InlineData(null, null, true, null)]
+    [InlineData(1, 1, true, null)]
+    public async Task PositionWarnings_RespectBuilderSlots_WithoutInventingDiscMetadata(
+        int? firstDisc, int? secondDisc, bool differentProgram, string? expectedKind)
+    {
+        await using var store = await TestDatabase.CreateAsync();
+        var db = store.Db;
+        var first = Song(1, "/source/album", track: 20, disc: firstDisc);
+        var second = Song(2, "/source/album", track: 20, disc: secondDisc);
+        first.Title = second.Title = "Example take";
+        first.DurationMs = 111000;
+        second.DurationMs = 124000;
+        second.EnrichmentStatus = EnrichmentStatus.NeedsReview;
+        if (differentProgram) second.Album = "Another Program";
+        foreach (var song in new[] { first, second })
+        {
+            song.OriginalMetadataCaptured = true;
+            song.OriginalDiscNumber = song.DiscNumber;
+        }
+        var resolver = new DestinationPathResolver(Microsoft.Extensions.Options.Options.Create(
+            new MusicEnricherOptions { DestinationDirectory = "/destination" }));
+        first.DestinationPath = resolver.ResolvePath(first);
+        first.LibraryBuildStatus = LibraryBuildStatus.Done;
+        var firstFolder = Path.GetDirectoryName(first.DestinationPath)!;
+        var secondFolder = Path.GetDirectoryName(resolver.ResolvePath(second))!;
+        // Exercise the existing guard's actual slot key without running its builder or mutations.
+        var nativeKey = typeof(LibraryBuilderService).GetMethod("PositionKey", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var firstKey = nativeKey.Invoke(null, new object?[] { TestUsers.OwnerId, firstFolder, firstDisc, 20 });
+        var secondKey = nativeKey.Invoke(null, new object?[] { TestUsers.OwnerId, secondFolder, secondDisc, 20 });
+        Assert.Equal(expectedKind is not null, Equals(firstKey, secondKey));
+        db.Songs.AddRange(first, second);
+        await db.SaveChangesAsync();
+        var before = await Snapshot(db);
+
+        var packet = await Read(db, new(["/source/album"], [2]));
+
+        Assert.Equal(new[] { 2 }, packet.Scope.TargetSongIds);
+        Assert.Equal(2, packet.Tracks.Count);
+        foreach (var (id, disc) in new[] { (1, firstDisc), (2, secondDisc) })
+        {
+            var track = packet.Tracks.Single(t => t.Id == id);
+            Assert.Equal(disc, (int?)track.Current.Values["DiscNumber"]);
+            Assert.Equal(disc, (int?)track.Original.Values["DiscNumber"]);
+            Assert.False(track.IsDuplicate);
+        }
+        if (expectedKind is null) Assert.Empty(packet.Conflicts);
+        else
+        {
+            var conflict = Assert.Single(packet.Conflicts);
+            Assert.Equal(expectedKind, conflict.Kind);
+            Assert.Equal(new[] { 1, 2 }, conflict.SongIds);
+            using var key = JsonDocument.Parse(conflict.Key);
+            var disc = key.RootElement.GetProperty("disc");
+            if (firstDisc is null || secondDisc is null) Assert.Equal(JsonValueKind.Null, disc.ValueKind);
+            else Assert.Equal(firstDisc, disc.GetInt32());
+        }
+        Assert.Equal(before, await Snapshot(db));
+        Assert.DoesNotContain(db.ChangeTracker.Entries(), e => e.State != EntityState.Unchanged);
+    }
 
     [PostgresFact]
     public async Task ThirteenMatchedPlusOneReview_HasWholeContextConflictAndContradictoryEvidence_WithoutWrites()
@@ -365,6 +437,15 @@ public sealed class AlbumReviewContextTests
 public sealed class PostgresFactAttribute : FactAttribute
 {
     public PostgresFactAttribute()
+    {
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("MH_REVIEW_TEST_POSTGRES")))
+            Skip = "Set MH_REVIEW_TEST_POSTGRES for disposable local PostgreSQL integration tests.";
+    }
+}
+
+public sealed class PostgresTheoryAttribute : TheoryAttribute
+{
+    public PostgresTheoryAttribute()
     {
         if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("MH_REVIEW_TEST_POSTGRES")))
             Skip = "Set MH_REVIEW_TEST_POSTGRES for disposable local PostgreSQL integration tests.";

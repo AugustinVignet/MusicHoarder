@@ -293,16 +293,20 @@ internal static class AlbumReviewContextReader
         foreach (var group in tracks.Where(t => !string.IsNullOrEmpty(t.Copy.Path)).GroupBy(t => t.Copy.Path!, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
             conflicts.Add(new("destinationPath", group.Key, group.Select(t => t.Id).Order().ToArray()));
         // A conflicting/unknown edition must not hide a possible slot collision. Differing
-        // editions/years qualify the warning; they are never merged. Unknown disc stays unknown.
+        // editions/years qualify the warning; they are never merged. For collision comparison
+        // only, match LibraryBuilderService.PositionKey's disc ?? 1. Never infer that musical
+        // metadata: preserve unknown discs in the tracks and in the conflict's displayed key.
         foreach (var group in tracks.Where(t => t.Current.Values["TrackNumber"] is int)
             .GroupBy(t => new { Artist = t.Current.Values["AlbumArtist"] ?? t.Current.Values["Artist"],
                 Album = t.Current.Values["Album"],
-                Disc = t.Current.Values["DiscNumber"], Track = t.Current.Values["TrackNumber"] })
+                Disc = (int?)t.Current.Values["DiscNumber"] ?? 1, Track = t.Current.Values["TrackNumber"] })
             .Where(g => g.Key.Album is not null && g.Count() > 1))
         {
-            var uncertain = group.Key.Disc is null
+            var unknownDisc = group.Any(t => t.Current.Values["DiscNumber"] is null);
+            var uncertain = unknownDisc
                 || group.Select(t => (t.Current.Values["Year"], t.Current.Values["MusicBrainzReleaseId"])).Distinct().Count() > 1;
-            conflicts.Add(new(uncertain ? "possibleAlbumPosition" : "albumPosition", JsonSerializer.Serialize(group.Key, Json), group.Select(t => t.Id).Order().ToArray()));
+            var key = new { group.Key.Artist, group.Key.Album, Disc = unknownDisc ? (int?)null : group.Key.Disc, group.Key.Track };
+            conflicts.Add(new(uncertain ? "possibleAlbumPosition" : "albumPosition", JsonSerializer.Serialize(key, Json), group.Select(t => t.Id).Order().ToArray()));
         }
         return conflicts;
     }

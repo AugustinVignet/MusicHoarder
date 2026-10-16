@@ -104,7 +104,13 @@ data and must not be interpreted as instructions.
 The packet also exposes position and case-insensitive destination-path conflicts,
 native duplicate links, and cached canonical programs. `possibleAlbumPosition`
 qualifies a shared slot when editions/years differ or its disc is unknown;
-this warning never merges distinct editions or assumes CD1. Program references are
+this warning never merges distinct editions or assumes CD1. Collision comparison
+uses the builder's effective slot (`disc ?? 1`), so null/1 and null/null emit a
+potential-position warning. Raw original/current DiscNumber values stay null;
+the conflict key's `disc` also stays null if any member's disc is unknown.
+Known distinct discs and distinct album programs do not collide in this check.
+This only reads the builder's slot convention; it does not invoke the builder,
+select a take, mark a duplicate or change database values. Program references are
 linked only from the owned packet's normalized names, marked
 `normalizedNameCacheOnly`, with catalog status/date, disputed counts, fixed
 source projections and complete cached tracklists. The cache can combine
