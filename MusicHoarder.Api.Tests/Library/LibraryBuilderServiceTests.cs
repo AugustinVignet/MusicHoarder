@@ -1752,6 +1752,49 @@ public class LibraryBuilderServiceTests
         Assert.Equal("upgraded-bytes", fileSystem.File.ReadAllText(destinationPath));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReviewPlan_HoldsCurrentAndPreviousCopy_AgainstABetterAutomaticCandidate(bool previous)
+    {
+        var destination = "/dest/Artist/2026 - Album/01 - Track.mp3";
+        var fs = new MockFileSystem(new Dictionary<string, MockFileData>
+        {
+            ["/source/new.mp3"] = new("NEW-CANDIDATE"), [destination] = new("OLD-COPY")
+        });
+        await using var db = CreateDbContext();
+        var held = CreateMatchedSong("/source/old.mp3", 8, libraryBuildStatus: LibraryBuildStatus.AwaitingReviewBuild, year: 1990);
+        held.ReviewPlanId = Guid.NewGuid(); held.IsManuallyApproved = true;
+        held.DestinationPath = previous ? "/dest/retained-other.mp3" : destination;
+        held.PreviousDestinationPath = previous ? destination : null;
+        var candidate = CreateMatchedSong("/source/new.mp3", 13);
+        db.Songs.AddRange(held, candidate); await db.SaveChangesAsync();
+        var tags = new RecordingTagWriter();
+        var result = await CreateService(db, fs, tags).ProcessNextBatchAsync(Guid.NewGuid());
+        Assert.Equal(0, result.Done); Assert.Empty(tags.Paths);
+        Assert.Equal("OLD-COPY", fs.File.ReadAllText(destination));
+        Assert.False(held.IsDuplicate); Assert.False(candidate.IsDuplicate);
+        Assert.Equal(LibraryBuildStatus.AwaitingReviewBuild, held.LibraryBuildStatus);
+        Assert.Equal(1990, held.Year);
+    }
+
+    [Fact]
+    public async Task ReviewPlan_AppliedAfterBatchSelection_PreventsAnyTrackCopy()
+    {
+        var fs = new MockFileSystem(new Dictionary<string, MockFileData> { ["/source/track.mp3"] = new("SOURCE") });
+        await using var db = CreateDbContext(); db.Songs.Add(CreateMatchedSong("/source/track.mp3", 6)); await db.SaveChangesAsync();
+        var tags = new RecordingTagWriter();
+        var scopes = new MutateFromSecondScopeFactory(db, tags, context =>
+        {
+            var song = context.Songs.First(); song.ReviewPlanId = Guid.NewGuid();
+            song.LibraryBuildStatus = LibraryBuildStatus.AwaitingReviewBuild; context.SaveChanges();
+        });
+        await CreateService(db, fs, tags, scopeFactoryOverride: scopes).ProcessNextBatchAsync(Guid.NewGuid());
+        Assert.Empty(tags.Paths);
+        Assert.Equal(LibraryBuildStatus.AwaitingReviewBuild, (await db.Songs.SingleAsync()).LibraryBuildStatus);
+        Assert.Single(fs.AllFiles);
+    }
+
     private static LibraryBuilderService CreateService(
         MusicHoarderDbContext db,
         IFileSystem fileSystem,
