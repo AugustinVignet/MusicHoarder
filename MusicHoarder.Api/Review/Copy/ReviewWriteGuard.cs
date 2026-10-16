@@ -11,17 +11,25 @@ namespace MusicHoarder.Api.Review.Copy;
 internal sealed class ReviewWriteGuard : IAsyncDisposable
 {
     private const long Key = 0x4d48525657524954;
-    private static readonly SemaphoreSlim Local = new(1, 1);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, SemaphoreSlim> Local = new();
+    private readonly long[] keys;
     private readonly NpgsqlConnection? connection;
-    private ReviewWriteGuard(NpgsqlConnection? connection) => this.connection = connection;
+    private ReviewWriteGuard(NpgsqlConnection? connection, params long[] keys) { this.connection = connection; this.keys = keys; }
 
     internal static async Task<ReviewWriteGuard?> AcquireAsync(MusicHoarderDbContext db, bool wait, CancellationToken ct)
+        => await AcquireKeyAsync(db, Key, wait, ct);
+
+    internal static Task<ReviewWriteGuard?> AcquireSongAsync(MusicHoarderDbContext db, int songId, bool wait, CancellationToken ct)
+        => AcquireKeyAsync(db, 0x4d48534f00000000L | (uint)songId, wait, ct);
+
+    private static async Task<ReviewWriteGuard?> AcquireKeyAsync(MusicHoarderDbContext db, long key, bool wait, CancellationToken ct)
     {
         if (!db.Database.IsNpgsql())
         {
-            if (wait) await Local.WaitAsync(ct);
-            else if (!await Local.WaitAsync(0, ct)) return null;
-            return new(null);
+            var gate = Local.GetOrAdd(key, _ => new(1, 1));
+            if (wait) await gate.WaitAsync(ct);
+            else if (!await gate.WaitAsync(0, ct)) return null;
+            return new(null, key);
         }
         var builder = new NpgsqlConnectionStringBuilder(db.Database.GetConnectionString()) { Pooling = false };
         var connection = new NpgsqlConnection(builder.ConnectionString);
@@ -30,12 +38,43 @@ internal sealed class ReviewWriteGuard : IAsyncDisposable
             await connection.OpenAsync(ct);
             await using var command = connection.CreateCommand();
             command.CommandText = wait ? "SELECT pg_advisory_lock(@key)" : "SELECT pg_try_advisory_lock(@key)";
-            command.Parameters.AddWithValue("key", Key);
+            command.Parameters.AddWithValue("key", key);
             // A blocked builder must remain cancellable during shutdown.
             command.CommandTimeout = 0;
             var result = await command.ExecuteScalarAsync(ct);
             if (!wait && result is not true) { await connection.DisposeAsync(); return null; }
-            return new(connection);
+            return new(connection, key);
+        }
+        catch { await connection.DisposeAsync(); throw; }
+    }
+
+    internal static async Task<ReviewWriteGuard?> AcquireSongsAsync(MusicHoarderDbContext db, IEnumerable<int> ids, CancellationToken ct)
+    {
+        var keys = ids.Distinct().Order().Select(id => 0x4d48534f00000000L | (uint)id).ToArray();
+        if (!db.Database.IsNpgsql())
+        {
+            var acquired = new List<long>();
+            try
+            {
+                foreach (var key in keys)
+                {
+                    if (!await Local.GetOrAdd(key, _ => new(1, 1)).WaitAsync(0, ct))
+                    { foreach (var held in acquired) Local[held].Release(); return null; }
+                    acquired.Add(key);
+                }
+                return new(null, keys);
+            }
+            catch { foreach (var held in acquired) Local[held].Release(); throw; }
+        }
+        var connection = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(db.Database.GetConnectionString()) { Pooling = false }.ConnectionString);
+        try
+        {
+            await connection.OpenAsync(ct);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT bool_and(pg_try_advisory_lock(k)) FROM unnest(@keys) AS k";
+            command.Parameters.AddWithValue("keys", keys);
+            if (await command.ExecuteScalarAsync(ct) is not true) { await connection.DisposeAsync(); return null; }
+            return new(connection, keys);
         }
         catch { await connection.DisposeAsync(); throw; }
     }
@@ -49,7 +88,7 @@ internal sealed class ReviewWriteGuard : IAsyncDisposable
     }
     public async ValueTask DisposeAsync()
     {
-        if (connection is null) Local.Release();
+        if (connection is null) foreach (var key in keys) Local[key].Release();
         else await connection.DisposeAsync(); // releases the session lock, including exceptional paths
     }
 }

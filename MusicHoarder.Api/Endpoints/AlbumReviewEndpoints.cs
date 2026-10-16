@@ -42,7 +42,7 @@ public static class AlbumReviewEndpoints
             .WithName("RetryVerifiedReviewJob").WithTags("Album review").Produces<ReviewCopyJobResult>();
         app.MapPost("/api/review/jobs/{id:guid}/rollback", RollbackJob).RequireAdmin()
             .WithName("RollbackVerifiedReviewJob").WithTags("Album review").Produces<ReviewCopyJobResult>();
-        return app;
+        return app.MapTargetedRetryEndpoints();
     }
 
     internal static Task<IResult> GetJob(Guid id, MusicHoarderDbContext db, ICurrentUserAccessor user,

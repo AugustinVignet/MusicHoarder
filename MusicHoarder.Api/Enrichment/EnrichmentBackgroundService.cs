@@ -168,7 +168,7 @@ public class EnrichmentBackgroundService(
             var candidates = await db.Songs
                 .IgnoreQueryFilters()
                 .Include(s => s.ProviderAttempts)
-                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic)
+                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && !s.AutomationHeld)
                 .Where(s => statusesToRetry.Contains(s.EnrichmentStatus))
                 .ToListAsync(ct);
 
@@ -213,7 +213,7 @@ public class EnrichmentBackgroundService(
             var candidates = await db.Songs
                 .IgnoreQueryFilters()
                 .Include(s => s.ProviderAttempts)
-                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic)
+                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && !s.AutomationHeld)
                 .ExcludingDemoTenant()
                 .Where(s => !s.IsManuallyApproved)
                 .Where(s => s.EnrichmentStatus == EnrichmentStatus.NeedsReview

@@ -652,7 +652,7 @@ public class LibraryBuilderService(
         var occupants = (await db.Songs
                 .IgnoreQueryFilters()
                 .AsNoTracking()
-                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && (!s.IsDuplicate || s.ReviewPlanId != null)
+                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && (!s.IsDuplicate || s.ReviewPlanId != null || s.AutomationHeld)
                     && s.DestinationPath != null && resolvedPaths.Contains(s.DestinationPath))
                 .ToListAsync(ct))
             .Where(s => !batchIds.Contains(s.Id))
@@ -678,7 +678,7 @@ public class LibraryBuilderService(
                 continue;
             }
 
-            if (occupant.ReviewPlanId.HasValue)
+            if (occupant.ReviewPlanId.HasValue || occupant.AutomationHeld)
             {
                 collisionFailures[candidate.Song.Id] = $"Destination path is held by exact review plan for song {occupant.Id}";
                 continue;
@@ -899,7 +899,7 @@ public class LibraryBuilderService(
         var allMembers = await db.Songs
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && s.ReviewPlanId == null)
+            .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && s.ReviewPlanId == null && !s.AutomationHeld)
             // AlbumGroupKey carries OwnerUserId, so a demo album can't cross into an owner's election;
             // excluded anyway since demo rows never build.
             .ExcludingDemoTenant()
@@ -970,7 +970,7 @@ public class LibraryBuilderService(
         // gate is not a file problem, and nothing on the way back to Matched resets the counter, so a
         // later match could never reach the library. The row's build state is left exactly as the
         // snapshot found it (a forced re-tag flag on a Done row survives for when it's Matched again).
-        var buildable = !song.IsDeleted && song.ReviewPlanId == null
+        var buildable = !song.IsDeleted && !song.AutomationHeld && song.ReviewPlanId == null
             && (song.EnrichmentStatus == EnrichmentStatus.Matched
                 || (options.Value.EnableBuildNeedsReview && song.EnrichmentStatus == EnrichmentStatus.NeedsReview));
         if (!buildable)
@@ -990,9 +990,9 @@ public class LibraryBuilderService(
         var occupantId = await db.Songs
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(s => s.Id != songId && s.DeletedAtUtc == null && (!s.IsDuplicate || s.ReviewPlanId != null)
+            .Where(s => s.Id != songId && s.DeletedAtUtc == null && (!s.IsDuplicate || s.ReviewPlanId != null || s.AutomationHeld)
                 && (s.DestinationPath == destinationPath
-                    || (s.ReviewPlanId != null && s.PreviousDestinationPath == destinationPath)))
+                    || ((s.ReviewPlanId != null || s.AutomationHeld) && s.PreviousDestinationPath == destinationPath)))
             .Select(s => (int?)s.Id)
             .FirstOrDefaultAsync(ct);
         var foldedPath = destinationPath.ToLowerInvariant();
