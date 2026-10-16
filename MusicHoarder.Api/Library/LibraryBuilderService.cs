@@ -266,30 +266,35 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
     private static string[] SingleOrEmpty(string? value)
         => NullIfEmpty(value) is string v ? [v] : [];
 
-    /// <summary>
-    /// Writes (or clears) an iTunes freeform dash atom, mirroring the empty-array handling of the
-    /// ID3/Xiph helpers above. TagLibSharp's <c>SetDashBoxes</c> dereferences <c>datastring[0]</c>
-    /// whenever the atom already exists, so calling it with an empty array on a re-tag throws
-    /// <see cref="IndexOutOfRangeException"/> — and the AppleTag branch, unlike ID3/Xiph, has no
-    /// guard of its own (issue #239). So: with no values, remove any existing atom instead of
-    /// writing; only call <c>SetDashBoxes</c> with a non-empty array.
-    /// </summary>
+    /// <summary>Replace every managed iTunes dash occurrence with one parent and N data values.
+    /// TagLibSharp 2.3.0's plural setter can add the same parent repeatedly and its getters can
+    /// hide later parents. Use the single setter to establish the parent, then add data children.</summary>
     private static void SetDash(TagLib.Mpeg4.AppleTag apple, string name, string[] values)
     {
         const string mean = "com.apple.iTunes";
-        if (values.Length == 0)
+        var old = Parents().ToArray();
+        if (old.Length > 4096) throw new InvalidDataException("Too many repeated native tag atoms.");
+        foreach (var parent in old)
         {
-            // GetDashBoxes returns null when the atom is absent. TagLibSharp stores a multi-value dash
-            // atom as one DASH box per value, and SetDashBox("") removes only a single box, so clear
-            // them one at a time until none remain (bounded so a non-progressing remove can't spin).
-            for (var guard = 0; apple.GetDashBoxes(mean, name)?.Length > 0 && guard < 64; guard++)
-            {
-                apple.SetDashBox(mean, name, string.Empty);
-            }
-            return;
+            // An empty malformed parent has no data for TagLib's remover to find. Supply a
+            // temporary empty child so the public remover can discard that entire parent too.
+            if (parent.GetChild("data") is null)
+                parent.AddChild(new TagLib.Mpeg4.AppleDataBox(new TagLib.ByteVector(), 1));
+            var actualName = ((TagLib.Mpeg4.AppleAdditionalInfoBox)parent.GetChild("name")).Text;
+            apple.SetDashBox(mean, actualName, string.Empty);
         }
+        if (Parents().Any()) throw new InvalidDataException("Unable to replace repeated native tag atoms.");
+        if (values.Length == 0) return;
+        apple.SetDashBox(mean, name, values[0]);
+        var canonical = Parents().Single();
+        foreach (var value in values.Skip(1))
+            canonical.AddChild(new TagLib.Mpeg4.AppleDataBox(
+                TagLib.ByteVector.FromString(value, TagLib.StringType.UTF8), 1));
 
-        apple.SetDashBoxes(mean, name, values);
+        IEnumerable<TagLib.Mpeg4.Box> Parents() => apple.Where(box => box.BoxType == "----"
+            && (box.GetChild("mean") as TagLib.Mpeg4.AppleAdditionalInfoBox)?.Text == mean
+            && string.Equals((box.GetChild("name") as TagLib.Mpeg4.AppleAdditionalInfoBox)?.Text,
+                name, StringComparison.OrdinalIgnoreCase));
     }
 
     private static void SetId3UserText(TagLib.Id3v2.Tag id3, string description, string[] values)
