@@ -687,6 +687,161 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.ToTable("ChatParticipants");
                 });
 
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.CopyAuditAttempt", b =>
+                {
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("SongId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Number")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("BytesHashed")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("CacheHits")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("ClaimId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("DecodeAttempts")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("FinishedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ReceiptJson")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("StartedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("JobId", "SongId", "Number");
+
+                    b.ToTable("CopyAuditAttempts");
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.CopyAuditJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("CancelRequested")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ExpectedContextRevision")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("NextAttemptAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ObservedContextRevision")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("OwnerUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ParentJobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ScopeJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ScopeState")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("WaitReason")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OwnerUserId", "RequestId")
+                        .IsUnique();
+
+                    b.HasIndex("State", "NextAttemptAtUtc", "CreatedAtUtc");
+
+                    b.ToTable("CopyAuditJobs");
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.CopyAuditTrack", b =>
+                {
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("SongId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid?>("ClaimId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("DestinationPath")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ExpectedDbRevision")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("FailureCode")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("NextAttemptAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ReceiptJson")
+                        .HasColumnType("text");
+
+                    b.Property<string>("SourcePath")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("TransientFailures")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("JobId", "SongId");
+
+                    b.HasIndex("State", "NextAttemptAtUtc");
+
+                    b.ToTable("CopyAuditTracks");
+                });
+
             modelBuilder.Entity("MusicHoarder.Api.Persistence.DedupDismissal", b =>
                 {
                     b.Property<int>("Id")
@@ -3119,6 +3274,24 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.Navigation("Conversation");
                 });
 
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.CopyAuditAttempt", b =>
+                {
+                    b.HasOne("MusicHoarder.Api.Persistence.CopyAuditTrack", null)
+                        .WithMany()
+                        .HasForeignKey("JobId", "SongId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.CopyAuditTrack", b =>
+                {
+                    b.HasOne("MusicHoarder.Api.Persistence.CopyAuditJob", null)
+                        .WithMany("Tracks")
+                        .HasForeignKey("JobId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("MusicHoarder.Api.Persistence.EnrichmentSnapshotSong", b =>
                 {
                     b.HasOne("MusicHoarder.Api.Persistence.EnrichmentSnapshot", "Snapshot")
@@ -3382,6 +3555,11 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.Navigation("Messages");
 
                     b.Navigation("Participants");
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.CopyAuditJob", b =>
+                {
+                    b.Navigation("Tracks");
                 });
 
             modelBuilder.Entity("MusicHoarder.Api.Persistence.EnrichmentSnapshot", b =>
