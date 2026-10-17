@@ -23,10 +23,11 @@ public class MusicHoarderDbContext : DbContext
 
     /// <summary>
     /// Used by <see cref="UserAwareModelCacheKeyFactory"/> to vary the compiled-model cache by the
-    /// captured user id. <c>"anon"</c> for design-time / background-service contexts.
+    /// captured user id. System contexts without an accessor and anonymous HTTP/background
+    /// accessors have different filter semantics and must never share a cached model.
     /// </summary>
     internal string ModelCacheKeySegment =>
-        _currentUser?.User is { } u ? u.Id.ToString("N") : "anon";
+        _currentUser is null ? "system" : _currentUser.User is { } u ? u.Id.ToString("N") : "anon";
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
@@ -34,6 +35,9 @@ public class MusicHoarderDbContext : DbContext
         optionsBuilder.ReplaceService<IModelCacheKeyFactory, UserAwareModelCacheKeyFactory>();
     }
 
+    public DbSet<CopyAuditJob> CopyAuditJobs { get; set; } = null!;
+    public DbSet<CopyAuditTrack> CopyAuditTracks { get; set; } = null!;
+    public DbSet<CopyAuditAttempt> CopyAuditAttempts { get; set; } = null!;
     public DbSet<SongMetadata> Songs { get; set; } = null!;
     public DbSet<TargetedRetryJob> TargetedRetryJobs { get; set; } = null!;
     public DbSet<TargetedRetryItem> TargetedRetryItems { get; set; } = null!;
@@ -101,6 +105,23 @@ public class MusicHoarderDbContext : DbContext
         var hasUser = _currentUser is not null;
         var userId = _currentUser?.UserId ?? Guid.Empty;
 
+        modelBuilder.Entity<CopyAuditJob>(entity =>
+        {
+            entity.HasKey(j => j.Id);
+            entity.HasIndex(j => new { j.OwnerUserId, j.RequestId }).IsUnique();
+            entity.HasIndex(j => new { j.State, j.NextAttemptAtUtc, j.CreatedAtUtc });
+            entity.HasMany(j => j.Tracks).WithOne().HasForeignKey(t => t.JobId).OnDelete(DeleteBehavior.Cascade);
+        });
+        modelBuilder.Entity<CopyAuditTrack>(entity =>
+        {
+            entity.HasKey(t => new { t.JobId, t.SongId });
+            entity.HasIndex(t => new { t.State, t.NextAttemptAtUtc });
+        });
+        modelBuilder.Entity<CopyAuditAttempt>(entity =>
+        {
+            entity.HasKey(a => new { a.JobId, a.SongId, a.Number });
+            entity.HasOne<CopyAuditTrack>().WithMany().HasForeignKey(a => new { a.JobId, a.SongId }).OnDelete(DeleteBehavior.Cascade);
+        });
         modelBuilder.Entity<TargetedRetryJob>(entity =>
         {
             entity.HasKey(j => j.Id);

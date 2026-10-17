@@ -445,3 +445,5 @@ copy jobs; applied metadata waits for the verified build workflow in lot C.
 
 Developer API: [explicit album audit contexts and bounded B scopes](docs/album-audit.md)
 (stage E; independent acceptance is required before integration).
+Developer API: [durable checks of existing library copies](docs/library-copy-audits.md)
+(stage F, provisionally based on delivered E; no integration or deployment).

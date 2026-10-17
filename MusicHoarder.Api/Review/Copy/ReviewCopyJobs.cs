@@ -129,6 +129,15 @@ internal sealed class ReviewAudioProofStore(MusicHoarderDbContext db) : IReviewA
     }
     public async Task SaveAsync(ReviewAudioProof proof, CancellationToken ct)
     {
+        if (db.Database.IsNpgsql())
+        {
+            var json = JsonSerializer.Serialize(proof, ReviewCopyJobs.Json);
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO "ReviewAudioCache" ("Version", "ContentSha256", "ProofJson") VALUES ({proof.Version}, {proof.ContentSha256}, {json})
+                ON CONFLICT ("Version", "ContentSha256") DO UPDATE SET "ProofJson" = EXCLUDED."ProofJson"
+                """, ct);
+            return;
+        }
         var entry = await db.ReviewAudioCache.SingleOrDefaultAsync(e => e.Version == proof.Version && e.ContentSha256 == proof.ContentSha256, ct);
         if (entry is null) db.ReviewAudioCache.Add(new ReviewAudioCacheEntry { Version = proof.Version,
             ContentSha256 = proof.ContentSha256, ProofJson = JsonSerializer.Serialize(proof, ReviewCopyJobs.Json) });
