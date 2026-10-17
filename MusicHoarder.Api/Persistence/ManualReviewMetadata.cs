@@ -1,4 +1,3 @@
-using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 
 namespace MusicHoarder.Api.Persistence;
@@ -11,9 +10,9 @@ internal static class ManualReviewMetadata
 {
     internal const string Source = "ManualReview";
 
-    internal static void Record(MusicHoarderDbContext db, SongMetadata song, string field, string? oldValue, string? newValue)
+    internal static SongMetadataChange Record(MusicHoarderDbContext db, SongMetadata song, string field, string? oldValue, string? newValue)
     {
-        db.SongMetadataChanges.Add(new SongMetadataChange
+        var change = new SongMetadataChange
         {
             Song = song,
             FieldName = field,
@@ -23,7 +22,9 @@ internal static class ManualReviewMetadata
             Confidence = 1,
             CreatedAtUtc = song.ManuallyApprovedAtUtc!.Value,
             AppliedAtUtc = song.ManuallyApprovedAtUtc,
-        });
+        };
+        db.SongMetadataChanges.Add(change);
+        return change;
     }
 
     internal static async Task LoadAsync(MusicHoarderDbContext db, IReadOnlyList<SongMetadata> songs, CancellationToken ct = default)
@@ -47,17 +48,10 @@ internal static class ManualReviewMetadata
         }
     }
 
-    internal static string? CurrentValue(SongMetadata song, string field) => field switch
-    {
-        nameof(song.Artist) => song.Artist,
-        nameof(song.AlbumArtist) => song.AlbumArtist,
-        nameof(song.Album) => song.Album,
-        nameof(song.Title) => song.Title,
-        nameof(song.Year) => song.Year?.ToString(CultureInfo.InvariantCulture),
-        nameof(song.TrackNumber) => song.TrackNumber?.ToString(CultureInfo.InvariantCulture),
-        nameof(song.DiscNumber) => song.DiscNumber?.ToString(CultureInfo.InvariantCulture),
-        _ => null,
-    };
+    internal static string? CurrentValue(SongMetadata song, string field) => Review.ReviewFields.Text(song, field);
+
+    internal static bool IsExplicitUnknown(SongMetadata song, string field) =>
+        song.HasManualReviewValue(field) && song.ManualReviewValues[field] is null;
 
     internal static string? EffectiveReleaseDate(SongMetadata song)
     {

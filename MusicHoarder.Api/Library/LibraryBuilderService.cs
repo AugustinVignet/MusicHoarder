@@ -65,7 +65,9 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         var variousArtists = DestinationPathResolver.IsVariousArtists(compilation, albumIdentity.AlbumArtist);
         var namedAlbumArtist = !string.IsNullOrWhiteSpace(albumIdentity.AlbumArtist)
             && !DestinationPathResolver.IsVariousArtistsSentinel(albumIdentity.AlbumArtist);
-        var albumArtists = variousArtists ? [VariousArtists] : BuildAlbumArtistArray(albumIdentity.AlbumArtist, song.Artist);
+        var albumArtists = (song.ReviewPlanId.HasValue && string.IsNullOrEmpty(albumIdentity.AlbumArtist))
+            || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.AlbumArtist)) ? []
+            : variousArtists ? [VariousArtists] : BuildAlbumArtistArray(albumIdentity.AlbumArtist, song.Artist);
 
         tag.Title = NullIfEmpty(song.Title);
         tag.Album = NullIfEmpty(albumIdentity.Album);
@@ -87,17 +89,19 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         // MusicBrainz IDs — the generic Tag writes the Picard-compatible frame per format.
         // Gotcha: MusicBrainzTrackId is the field that holds the RECORDING id (track-level).
         // Only assign when present: the Xiph (FLAC) setters throw on null.
-        SetIfPresent(NullIfEmpty(song.MusicBrainzId), v => tag.MusicBrainzTrackId = v);
-        SetIfPresent(NullIfEmpty(albumIdentity.MusicBrainzReleaseId), v => tag.MusicBrainzReleaseId = v);
-        SetIfPresent(NullIfEmpty(albumIdentity.MusicBrainzReleaseGroupId), v => tag.MusicBrainzReleaseGroupId = v);
-        var albumArtistMbid = variousArtists ? VariousArtistsMbid : NullIfEmpty(albumIdentity.AlbumArtistMusicBrainzId);
-        if (namedAlbumArtist && albumArtistMbid == VariousArtistsMbid) albumArtistMbid = null;
+        SetReviewed(song, nameof(song.MusicBrainzId), NullIfEmpty(song.MusicBrainzId), v => tag.MusicBrainzTrackId = v);
+        SetReviewed(song, nameof(song.MusicBrainzReleaseId), NullIfEmpty(albumIdentity.MusicBrainzReleaseId), v => tag.MusicBrainzReleaseId = v);
+        SetReviewed(song, nameof(song.MusicBrainzReleaseGroupId), NullIfEmpty(albumIdentity.MusicBrainzReleaseGroupId), v => tag.MusicBrainzReleaseGroupId = v);
+        var albumArtistMbid = ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.AlbumArtistMusicBrainzId)) ? null
+            : variousArtists && !song.ReviewPlanId.HasValue ? VariousArtistsMbid : NullIfEmpty(albumIdentity.AlbumArtistMusicBrainzId);
+        if (!song.ReviewPlanId.HasValue && namedAlbumArtist && albumArtistMbid == VariousArtistsMbid) albumArtistMbid = null;
         // Clear a stale VA identity on re-tag even when the real artist's MBID is unknown.
         // Other absent IDs retain the existing conservative preserve-if-unknown behavior.
-        if (albumArtistMbid is not null || (namedAlbumArtist && tag.MusicBrainzReleaseArtistId == VariousArtistsMbid))
+        if (song.ReviewPlanId.HasValue || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.AlbumArtistMusicBrainzId))
+            || albumArtistMbid is not null || (namedAlbumArtist && tag.MusicBrainzReleaseArtistId == VariousArtistsMbid))
             tag.MusicBrainzReleaseArtistId = albumArtistMbid ?? string.Empty;
         var artistIds = MusicHoarder.Api.Metadata.MultiValue.Split(song.ArtistMusicBrainzIds);
-        SetIfPresent(artistIds.Length > 0 ? artistIds[0] : null, v => tag.MusicBrainzArtistId = v);
+        SetReviewed(song, nameof(song.ArtistMusicBrainzIds), artistIds.Length > 0 ? artistIds[0] : null, v => tag.MusicBrainzArtistId = v);
 
         // Embed lyrics: the user's preferred source (AI transcription or LRCLIB), synced over plain.
         tag.Lyrics = NullIfEmpty(song.EffectiveSyncedLyrics) ?? NullIfEmpty(song.EffectivePlainLyrics) ?? string.Empty;
@@ -110,8 +114,9 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         tag.Copyright = NullIfEmpty(song.Copyright);
         // Sort names align positionally with the single-value display ARTIST / the album artist.
         tag.PerformersSort = NullIfEmpty(song.ArtistSort) is string artistSort ? [artistSort] : [];
-        var albumArtistSort = variousArtists ? VariousArtists : NullIfEmpty(song.AlbumArtistSort);
-        if (namedAlbumArtist && albumArtistSort is not null && DestinationPathResolver.IsVariousArtistsSentinel(albumArtistSort))
+        var albumArtistSort = ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.AlbumArtistSort)) ? null
+            : variousArtists && !song.ReviewPlanId.HasValue ? VariousArtists : NullIfEmpty(song.AlbumArtistSort);
+        if (!song.ReviewPlanId.HasValue && namedAlbumArtist && albumArtistSort is not null && DestinationPathResolver.IsVariousArtistsSentinel(albumArtistSort))
             albumArtistSort = null;
         tag.AlbumArtistsSort = albumArtistSort is null ? [] : [albumArtistSort];
 
@@ -159,9 +164,10 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         }
     }
 
-    private static void SetIfPresent(string? value, Action<string> set)
+    private static void SetReviewed(SongMetadata song, string field, string? value, Action<string> set)
     {
         if (!string.IsNullOrWhiteSpace(value)) set(value);
+        else if (song.ReviewPlanId.HasValue || ManualReviewMetadata.IsExplicitUnknown(song, field)) set(string.Empty);
     }
 
     private static void WriteExtendedTags(
@@ -173,7 +179,7 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         // NO ARTISTS frame at all: a combined credit as a single ARTISTS value would cement a fake
         // merged artist in Navidrome and defeat its own separator heuristics on the singular ARTIST.
         var artists = MusicHoarder.Api.Metadata.MultiValue.Split(song.Artists);
-        if (artists.Length == 0 && song.Artist?.Contains(';') == true)
+        if (!song.ReviewPlanId.HasValue && !ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.Artists)) && artists.Length == 0 && song.Artist?.Contains(';') == true)
         {
             artists = SplitOnSemicolon(song.Artist);
         }
@@ -208,12 +214,15 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
             SetId3UserText(id3, "ALBUMARTISTS", albumArtists);
             SetId3UserText(id3, "MusicBrainz Album Type", releaseTypes);
             SetId3Text(id3, "TCMP", compilation ? ["1"] : []);
-            if (alignedArtistIds.Length > 0) SetId3UserText(id3, "MusicBrainz Artist Id", alignedArtistIds);
+            if (song.ReviewPlanId.HasValue || alignedArtistIds.Length > 0 || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.ArtistMusicBrainzIds))) SetId3UserText(id3, "MusicBrainz Artist Id", alignedArtistIds);
             SetId3Text(id3, "TPUB", label);                       // publisher / label
             SetId3UserText(id3, "CATALOGNUMBER", catalogNumber);
             SetId3UserText(id3, "BARCODE", barcode);
+            SetId3UserText(id3, "SPOTIFY_TRACK_ID", SingleOrEmpty(song.SpotifyId));
+            SetId3UserText(id3, "Acoustid Id", SingleOrEmpty(song.AcoustIdTrackId));
             if (releaseDate is not null) SetId3Text(id3, "TDRC", [releaseDate]);   // recording/release date
-            if (originalDate is not null) SetId3Text(id3, "TDOR", [originalDate]); // original release date
+            if (originalDate is not null || song.ReviewPlanId.HasValue || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.OriginalReleaseDate)))
+                SetId3Text(id3, "TDOR", SingleOrEmpty(originalDate)); // original release date
         }
 
         if (file.GetTag(TagLib.TagTypes.Xiph, false) is TagLib.Ogg.XiphComment xiph)
@@ -222,13 +231,17 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
             SetXiph(xiph, "ALBUMARTISTS", albumArtists);
             SetXiph(xiph, "RELEASETYPE", releaseTypes);
             SetXiph(xiph, "COMPILATION", compilation ? ["1"] : []);
-            if (alignedArtistIds.Length > 0) SetXiph(xiph, "MUSICBRAINZ_ARTISTID", alignedArtistIds);
+            if (song.ReviewPlanId.HasValue || alignedArtistIds.Length > 0 || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.ArtistMusicBrainzIds))) SetXiph(xiph, "MUSICBRAINZ_ARTISTID", alignedArtistIds);
             SetXiph(xiph, "LABEL", label);
             SetXiph(xiph, "CATALOGNUMBER", catalogNumber);
             SetXiph(xiph, "BARCODE", barcode);
+            SetXiph(xiph, "SPOTIFY_TRACK_ID", SingleOrEmpty(song.SpotifyId));
+            SetXiph(xiph, "ACOUSTID_ID", SingleOrEmpty(song.AcoustIdTrackId));
             if (releaseDate is not null) SetXiph(xiph, "DATE", [releaseDate]);
-            if (originalDate is not null) SetXiph(xiph, "ORIGINALDATE", [originalDate]);
-            if (originalYear is not null) SetXiph(xiph, "ORIGINALYEAR", [originalYear]);
+            if (originalDate is not null || song.ReviewPlanId.HasValue || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.OriginalReleaseDate)))
+                SetXiph(xiph, "ORIGINALDATE", SingleOrEmpty(originalDate));
+            if (originalYear is not null || song.ReviewPlanId.HasValue || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.OriginalReleaseDate)))
+                SetXiph(xiph, "ORIGINALYEAR", SingleOrEmpty(originalYear));
         }
 
         if (file.GetTag(TagLib.TagTypes.Apple, false) is TagLib.Mpeg4.AppleTag apple)
@@ -236,12 +249,16 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
             SetDash(apple, "ARTISTS", artists);
             SetDash(apple, "ALBUMARTISTS", albumArtists);
             SetDash(apple, "MusicBrainz Album Type", releaseTypes);
-            apple.IsCompilation = compilation;
-            if (alignedArtistIds.Length > 0) SetDash(apple, "MusicBrainz Artist Id", alignedArtistIds);
+            if (ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.IsCompilation))) apple.SetData("cpil", Array.Empty<TagLib.Mpeg4.AppleDataBox>());
+            else apple.IsCompilation = compilation;
+            if (song.ReviewPlanId.HasValue || alignedArtistIds.Length > 0 || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.ArtistMusicBrainzIds))) SetDash(apple, "MusicBrainz Artist Id", alignedArtistIds);
             SetDash(apple, "LABEL", label);
             SetDash(apple, "CATALOGNUMBER", catalogNumber);
             SetDash(apple, "BARCODE", barcode);
-            if (originalDate is not null) SetDash(apple, "ORIGINALDATE", [originalDate]);
+            SetDash(apple, "SPOTIFY_TRACK_ID", SingleOrEmpty(song.SpotifyId));
+            SetDash(apple, "Acoustid Id", SingleOrEmpty(song.AcoustIdTrackId));
+            if (originalDate is not null || song.ReviewPlanId.HasValue || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.OriginalReleaseDate)))
+                SetDash(apple, "ORIGINALDATE", SingleOrEmpty(originalDate));
         }
     }
 
@@ -617,13 +634,14 @@ public class LibraryBuilderService(
         var occupants = (await db.Songs
                 .IgnoreQueryFilters()
                 .AsNoTracking()
-                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && !s.IsDuplicate
+                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && (!s.IsDuplicate || s.ReviewPlanId != null)
                     && s.DestinationPath != null && resolvedPaths.Contains(s.DestinationPath))
                 .ToListAsync(ct))
             .Where(s => !batchIds.Contains(s.Id))
             .GroupBy(s => s.DestinationPath!, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g
-                .OrderByDescending(IDuplicateDetectionService.QualityScore)
+                .OrderByDescending(s => s.ReviewPlanId.HasValue)
+                .ThenByDescending(IDuplicateDetectionService.QualityScore)
                 .ThenByDescending(s => s.FileSizeBytes)
                 .ThenBy(s => s.Id)
                 .First(), StringComparer.Ordinal);
@@ -639,6 +657,12 @@ public class LibraryBuilderService(
             if (!occupants.TryGetValue(candidate.DestinationPath, out var occupant))
             {
                 survivors.Add(candidate);
+                continue;
+            }
+
+            if (occupant.ReviewPlanId.HasValue)
+            {
+                collisionFailures[candidate.Song.Id] = $"Destination path is held by exact review plan for song {occupant.Id}";
                 continue;
             }
 
@@ -857,7 +881,7 @@ public class LibraryBuilderService(
         var allMembers = await db.Songs
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic)
+            .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && s.ReviewPlanId == null)
             // AlbumGroupKey carries OwnerUserId, so a demo album can't cross into an owner's election;
             // excluded anyway since demo rows never build.
             .ExcludingDemoTenant()
@@ -926,7 +950,7 @@ public class LibraryBuilderService(
         // gate is not a file problem, and nothing on the way back to Matched resets the counter, so a
         // later match could never reach the library. The row's build state is left exactly as the
         // snapshot found it (a forced re-tag flag on a Done row survives for when it's Matched again).
-        var buildable = !song.IsDeleted
+        var buildable = !song.IsDeleted && song.ReviewPlanId == null
             && (song.EnrichmentStatus == EnrichmentStatus.Matched
                 || (options.Value.EnableBuildNeedsReview && song.EnrichmentStatus == EnrichmentStatus.NeedsReview));
         if (!buildable)
@@ -946,8 +970,9 @@ public class LibraryBuilderService(
         var occupantId = await db.Songs
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(s => s.Id != songId && s.DeletedAtUtc == null && !s.IsDuplicate
-                && s.DestinationPath == destinationPath)
+            .Where(s => s.Id != songId && s.DeletedAtUtc == null && (!s.IsDuplicate || s.ReviewPlanId != null)
+                && (s.DestinationPath == destinationPath
+                    || (s.ReviewPlanId != null && s.PreviousDestinationPath == destinationPath)))
             .Select(s => (int?)s.Id)
             .FirstOrDefaultAsync(ct);
         if (occupantId is { } occupant)

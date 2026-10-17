@@ -165,6 +165,10 @@ internal static class AlbumReviewContextReader
             .Where(a => allIds.Contains(a.SongId) && a.Song.OwnerUserId == owner)
             .OrderBy(a => a.Id).Take(MaxEvidenceRows + 1).ToListAsync(ct);
         CheckEvidenceLimit(links.Count + changes.Count + attempts.Count);
+        foreach (var song in members.Values)
+            song.ManualReviewValues = changes.Where(c => c.SongId == song.Id && c.Source == ManualReviewMetadata.Source
+                && c.AppliedAtUtc == song.ManuallyApprovedAtUtc && c.RevertedAtUtc == null)
+                .GroupBy(c => c.FieldName).ToDictionary(g => g.Key, g => g.MaxBy(c => c.Id)!.NewValue);
         var tracks = members.Values.OrderBy(s => s.Id).Select(s => new AlbumReviewTrack(
             s.Id, Parent(s.SourcePath)!, s.SourcePath, s.FileName, reasons[s.Id].ToArray(),
             s.FileSizeBytes, s.LastModifiedUtc, s.MatchedBy, s.MatchConfidence, s.EnrichmentLastAttemptedAtUtc,
@@ -172,17 +176,17 @@ internal static class AlbumReviewContextReader
             s.IndexedAtUtc, s.EnrichedAtUtc, s.DurationMs, s.DurationSeconds,
             new(s.OriginalMetadataCaptured ? "capturedOriginalTags" : "notCaptured",
                 s.OriginalMetadataCapturedAtUtc, s.OriginalMetadataCaptured ? Values(s, original: true) : new Dictionary<string, object?>()),
-            new("currentDatabaseTags", null, Values(s)), s.IsManuallyApproved, s.ManuallyApprovedAtUtc,
+            new("currentDatabaseTags", null, ReviewFields.Values(s)), s.IsManuallyApproved, s.ManuallyApprovedAtUtc,
             changes.Where(c => c.SongId == s.Id && s.IsManuallyApproved && s.ManuallyApprovedAtUtc.HasValue
                 && c.Source == ManualReviewMetadata.Source && c.AppliedAtUtc == s.ManuallyApprovedAtUtc && c.RevertedAtUtc == null)
                 .GroupBy(c => c.FieldName, StringComparer.Ordinal).Select(g => g.MaxBy(c => c.Id)!)
                 .OrderBy(c => c.FieldName, StringComparer.Ordinal)
                 .Select(c => new AlbumReviewManualField(c.FieldName, c.NewValue, c.NewValue is null ? "explicitUnknown" : "approvedValue", c.Id)).ToArray(),
             changes.Where(c => c.SongId == s.Id).Select(c => new AlbumReviewChange(c.Id, c.FieldName, c.OldValue,
-                c.NewValue, c.Source, c.Confidence, c.CreatedAtUtc, c.AppliedAtUtc, c.RevertedAtUtc)).ToArray(),
+                c.NewValue, c.Source, c.Confidence, c.CreatedAtUtc, c.AppliedAtUtc, c.RevertedAtUtc, c.ActorUserId, c.Reason, c.EvidenceReferencesJson, c.ReviewPlanRevision)).ToArray(),
             attempts.Where(a => a.SongId == s.Id).Select(Candidate).ToArray(), Warnings(s.MatchWarnings),
             s.EnrichmentError != null, s.IsDuplicate, s.DuplicateOfId is { } keeper && members.ContainsKey(keeper) ? keeper : null,
-            ObserveCopy(files, s))).ToArray();
+            ObserveCopy(files, s), s.ReviewPlanId, s.IsSynthetic, s.IsUnreleased)).ToArray();
 
         var programs = await ProgramsAsync(db, members.Values.ToArray(), ct);
         CheckEvidenceLimit(links.Count + changes.Count + attempts.Count + programs.Sum(p => p.Tracks.Count + p.Sources.Count + 1));
@@ -257,7 +261,7 @@ internal static class AlbumReviewContextReader
             song.LibraryBuildLastAttemptedAtUtc, song.LibraryBuildError != null, "unknown", previous);
     }
 
-    private static AlbumReviewFileObservation ObserveFile(IFileSystem files, string? path)
+    internal static AlbumReviewFileObservation ObserveFile(IFileSystem files, string? path)
     {
         var presence = "notConfigured";
         long? size = null;
@@ -287,7 +291,7 @@ internal static class AlbumReviewContextReader
         return new(path ?? "", presence, size, modified);
     }
 
-    private static IReadOnlyList<AlbumReviewConflict> Conflicts(IReadOnlyList<AlbumReviewTrack> tracks)
+    internal static IReadOnlyList<AlbumReviewConflict> Conflicts(IReadOnlyList<AlbumReviewTrack> tracks)
     {
         var conflicts = new List<AlbumReviewConflict>();
         foreach (var group in tracks.Where(t => !string.IsNullOrEmpty(t.Copy.Path)).GroupBy(t => t.Copy.Path!, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
@@ -362,7 +366,7 @@ internal static class AlbumReviewContextReader
     private static AlbumReviewReadException NotFound() => new(404, "selection_not_found", "The complete selection is unavailable to this owner.");
 
     // Projection generated from the explicit tag allowlist and provenance fields below.
-    private static IQueryable<SongMetadata> Project(IQueryable<SongMetadata> query) => query.Select(s => new SongMetadata
+    internal static IQueryable<SongMetadata> Project(IQueryable<SongMetadata> query) => query.Select(s => new SongMetadata
     {
         Id = s.Id,
         OwnerUserId = s.OwnerUserId,
@@ -380,6 +384,9 @@ internal static class AlbumReviewContextReader
         MatchWarnings = s.MatchWarnings,
         EnrichmentError = s.EnrichmentError,
         IsManuallyApproved = s.IsManuallyApproved,
+        ReviewPlanId = s.ReviewPlanId,
+        IsUnreleased = s.IsUnreleased,
+        IsSynthetic = s.IsSynthetic,
         ManuallyApprovedAtUtc = s.ManuallyApprovedAtUtc,
         OriginalMetadataCaptured = s.OriginalMetadataCaptured,
         OriginalMetadataCapturedAtUtc = s.OriginalMetadataCapturedAtUtc,

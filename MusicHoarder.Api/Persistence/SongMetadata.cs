@@ -231,6 +231,9 @@ public class SongMetadata
     /// re-scan can never silently undo a curated decision.
     /// </summary>
     public bool IsManuallyApproved { get; set; }
+    /// <summary>Exact reviewed metadata is held out of automatic build/heal flows.
+    /// Verified copy jobs are a separate, explicit stage.</summary>
+    public Guid? ReviewPlanId { get; set; }
     public DateTime? ManuallyApprovedAtUtc { get; set; }
 
     // Loaded from the current approval's audit rows before building or automatic corrections;
@@ -240,7 +243,8 @@ public class SongMetadata
 
     internal bool HasManualReviewValue(string field) => IsManuallyApproved
         && ManualReviewValues.TryGetValue(field, out var approved)
-        && string.Equals(approved, ManualReviewMetadata.CurrentValue(this, field), StringComparison.Ordinal);
+        && (string.Equals(approved, ManualReviewMetadata.CurrentValue(this, field), StringComparison.Ordinal)
+            || (field == nameof(IsCompilation) && approved is null && !IsCompilation));
 
     public bool OriginalMetadataCaptured { get; set; }
     public string? OriginalArtist { get; set; }
@@ -677,6 +681,7 @@ public class SongMetadata
     public IReadOnlyList<(string Field, string? OldValue, string? NewValue)> ApplyCanonicalCorrection(
         string? album, string? albumArtist, int? year, int? trackNumber, int? discNumber)
     {
+        if (ReviewPlanId.HasValue) return [];
         var changes = new List<(string, string?, string?)>();
         CaptureOriginalMetadata();
 
@@ -734,11 +739,11 @@ public class SongMetadata
         Library.AlbumIdentity identity)
     {
         ArgumentNullException.ThrowIfNull(identity);
+        if (ReviewPlanId.HasValue) return [];
 
         // Guard before mutating the row: the builder's per-track override only applies while
         // the native value still equals the explicit value from the current approval.
         identity = identity.WithManualReview(this);
-
         var changes = new List<(string, string?, string?)>();
         CaptureOriginalMetadata();
 
@@ -808,6 +813,7 @@ public class SongMetadata
 
     public void ApplyEnrichmentMatch(EnrichmentMatchData match)
     {
+        if (ReviewPlanId.HasValue) return;
         CaptureOriginalMetadata();
 
         Artist = string.IsNullOrWhiteSpace(match.Artist) ? Artist : match.Artist;
@@ -899,6 +905,7 @@ public class SongMetadata
     /// <summary>Clears the manual-approval lock, allowing the pipeline to re-enrich it.</summary>
     public void UnlockManualApproval()
     {
+        ReviewPlanId = null;
         ManualReviewValues = new Dictionary<string, string?>();
         IsManuallyApproved = false;
         ManuallyApprovedAtUtc = null;
@@ -1425,6 +1432,7 @@ public enum LibraryBuildStatus
     Tagged = 2,
     Done = 3,
     Failed = 4,
+    AwaitingReviewBuild = 5,
 }
 
 public enum LyricsStatus

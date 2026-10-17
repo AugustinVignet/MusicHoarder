@@ -1256,6 +1256,48 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.ToTable("PlaylistEntries");
                 });
 
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.ReviewPlan", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ActorUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("AppliedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ContextJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("OwnerUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PreviewJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("RequestJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Revision")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OwnerUserId", "CreatedAtUtc");
+
+                    b.ToTable("ReviewPlans");
+                });
+
             modelBuilder.Entity("MusicHoarder.Api.Persistence.RuntimeSettings", b =>
                 {
                     b.Property<int>("Id")
@@ -1718,6 +1760,10 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.Property<string>("ReleaseTypes")
                         .HasColumnType("text");
 
+                    b.Property<Guid?>("ReviewPlanId")
+                        .IsConcurrencyToken()
+                        .HasColumnType("uuid");
+
                     b.Property<string>("RomanizedPlainLyrics")
                         .HasColumnType("text");
 
@@ -1824,6 +1870,9 @@ namespace MusicHoarder.Api.Persistence.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
+                    b.Property<Guid?>("ActorUserId")
+                        .HasColumnType("uuid");
+
                     b.Property<DateTime?>("AppliedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
@@ -1832,6 +1881,9 @@ namespace MusicHoarder.Api.Persistence.Migrations
 
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("EvidenceReferencesJson")
+                        .HasColumnType("text");
 
                     b.Property<string>("FieldName")
                         .IsRequired()
@@ -1844,8 +1896,16 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.Property<string>("OldValue")
                         .HasColumnType("text");
 
+                    b.Property<string>("Reason")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
                     b.Property<DateTime?>("RevertedAtUtc")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ReviewPlanRevision")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<int>("SongId")
                         .HasColumnType("integer");

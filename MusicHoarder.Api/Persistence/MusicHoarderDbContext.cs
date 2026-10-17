@@ -35,6 +35,7 @@ public class MusicHoarderDbContext : DbContext
     }
 
     public DbSet<SongMetadata> Songs { get; set; } = null!;
+    public DbSet<ReviewPlan> ReviewPlans { get; set; } = null!;
     public DbSet<SongDuplicateLink> SongDuplicateLinks { get; set; } = null!;
     public DbSet<ArtistAlias> ArtistAliases { get; set; } = null!;
     public DbSet<DedupDismissal> DedupDismissals { get; set; } = null!;
@@ -91,6 +92,15 @@ public class MusicHoarderDbContext : DbContext
         // invited friends; revisit before tenant counts grow into dozens.
         var hasUser = _currentUser is not null;
         var userId = _currentUser?.UserId ?? Guid.Empty;
+
+        modelBuilder.Entity<SongMetadata>().Property(s => s.ReviewPlanId).IsConcurrencyToken();
+        modelBuilder.Entity<ReviewPlan>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => new { p.OwnerUserId, p.CreatedAtUtc });
+            entity.Property(p => p.Revision).HasMaxLength(64);
+            entity.HasQueryFilter(p => !hasUser || p.OwnerUserId == userId);
+        });
 
         modelBuilder.Entity<SongMetadata>(entity =>
         {

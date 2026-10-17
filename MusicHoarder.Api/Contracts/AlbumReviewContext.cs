@@ -24,7 +24,8 @@ public sealed record AlbumReviewTags(
 
 public sealed record AlbumReviewChange(
     int Id, string Field, string? OldValue, string? NewValue, string Source,
-    double Confidence, DateTime CreatedAtUtc, DateTime? AppliedAtUtc, DateTime? RevertedAtUtc);
+    double Confidence, DateTime CreatedAtUtc, DateTime? AppliedAtUtc, DateTime? RevertedAtUtc,
+    Guid? ActorUserId = null, string? Reason = null, string? EvidenceReferencesJson = null, string? ReviewPlanRevision = null);
 
 public sealed record AlbumReviewManualField(string Field, string? Value, string State, int AuditId);
 
@@ -54,7 +55,7 @@ public sealed record AlbumReviewTrack(
     IReadOnlyList<AlbumReviewManualField> ManualFields,
     IReadOnlyList<AlbumReviewChange> Changes, IReadOnlyList<AlbumReviewCandidate> Candidates,
     IReadOnlyList<string> Warnings, bool HasEnrichmentError, bool IsDuplicate, int? DuplicateOfId,
-    AlbumReviewCopy Copy);
+    AlbumReviewCopy Copy, Guid? ReviewPlanId = null, bool IsSynthetic = false, bool IsUnreleased = false);
 
 public sealed record AlbumReviewDuplicate(
     int Id, int SongIdLow, int SongIdHigh, string Status, string Confidence,
