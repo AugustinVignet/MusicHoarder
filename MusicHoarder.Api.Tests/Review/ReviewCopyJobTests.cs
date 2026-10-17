@@ -27,6 +27,45 @@ public sealed class ReviewCopyJobTests : IDisposable
         => new(db, files, writer ?? new TagLibLibraryTagWriter(), Resolver, Runner, points);
 
     [PostgresTheory]
+    [InlineData(0)]
+    [InlineData(7)]
+    public async Task LegacySnapshotApprovalSurvivesPostgresPrecision_CopyAndRollback(int extraTicks)
+    {
+        await using var store = await Store.CreateAsync();
+        var song = await AddSong(store.Db);
+        var plan = await Plan(store.Db, [song], new { Genre = "Reviewed" });
+        await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, plan.Id, plan.Revision, default);
+        song = await store.Db.Songs.SingleAsync(); // Preview/Apply reload their own tracked instance.
+        var track = await store.Db.ReviewCopyTracks.SingleAsync();
+        var snapshot = ReviewCopyJobs.Read(track.AfterJson);
+        var timestamp = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddTicks(1234560 + extraTicks);
+        // Controlled clock value, preserving every other approved value and its audit.
+        // Production Apply emits this precision on Linux; PostgreSQL stores microseconds.
+        song.ManuallyApprovedAtUtc = timestamp;
+        foreach (var audit in await store.Db.SongMetadataChanges.Where(a => a.SongId == song.Id).ToArrayAsync())
+        { audit.CreatedAtUtc = timestamp; audit.AppliedAtUtc = timestamp; }
+        track.AfterJson = JsonSerializer.Serialize(snapshot with { ApprovedAtUtc = timestamp }, ReviewCopyJobs.Json);
+        if (extraTicks != 0)
+        {
+            // A pre-C-R1 worker already refused its own legacy snapshot.
+            track.State = "failed"; track.FailureCode = "plan_superseded";
+            (await store.Db.ReviewCopyJobs.SingleAsync()).State = "needsAttention";
+        }
+        await store.Db.SaveChangesAsync();
+        await using var reloadedDb = NewDb(store);
+        var reloaded = await reloadedDb.Songs.SingleAsync();
+        await ManualReviewMetadata.LoadAsync(reloadedDb, [reloaded]);
+        Assert.True(ReviewCopyJobs.Matches(reloaded, track.AfterJson),
+            "A PostgreSQL round trip must not invent a later correction when only timestamp precision changes.");
+        if (extraTicks != 0) await ReviewCopyJobs.RetryAsync(reloadedDb, Owner, track.JobId, default);
+        Assert.True(await Processor(reloadedDb).RunNextAsync(default));
+        Assert.Equal("published", (await reloadedDb.ReviewCopyTracks.SingleAsync()).State);
+        await using var rollbackDb = NewDb(store);
+        await ReviewCopyRollback.RunAsync(rollbackDb, files, Owner, track.JobId, default);
+        Assert.Equal("rolledBack", (await rollbackDb.ReviewCopyJobs.SingleAsync()).State);
+    }
+
+    [PostgresTheory]
     [InlineData("silence.mp3")]
     [InlineData("silence.flac")]
     [InlineData("silence.m4a")]
@@ -195,14 +234,25 @@ public sealed class ReviewCopyJobTests : IDisposable
                 JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("{\"Genre\":\"Reviewed\"}")!)).ToArray());
         var plan = await ReviewPlanService.PreviewAsync(store.Db, files, Resolver, Owner, request, default);
         Assert.True(plan.CanApply); var receipt = await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, plan.Id, plan.Revision, default);
-        await Processor(store.Db).RunNextAsync(default);
-        var job = await ReviewCopyJobs.OwnedAsync(store.Db, Owner, receipt.JobId!.Value, default);
+        await using var restarted = NewDb(store);
+        await Processor(restarted).RunNextAsync(default);
+        var job = await ReviewCopyJobs.OwnedAsync(restarted, Owner, receipt.JobId!.Value, default);
         Assert.Equal("completed", job.State); Assert.Equal(14, job.Tracks.Count);
         Assert.Equal(14, job.Tracks.Select(t => t.DestinationPath).Distinct().Count());
         Assert.All(job.Tracks, t => { Assert.Equal("published", t.State); Assert.True(File.Exists(t.BackupPath)); });
-        var final = await store.Db.Songs.AsNoTracking().OrderBy(s => s.TrackNumber).ToArrayAsync();
+        var final = await restarted.Songs.AsNoTracking().OrderBy(s => s.TrackNumber).ToArrayAsync();
         Assert.Equal(Enumerable.Range(1, 14), final.Select(s => s.TrackNumber!.Value));
         Assert.All(final, s => { Assert.False(s.IsDuplicate); Assert.Equal(EnrichmentStatus.Matched, s.EnrichmentStatus); });
+        await using var rollbackDb = NewDb(store);
+        await ReviewCopyRollback.RunAsync(rollbackDb, files, Owner, job.Id, default);
+        Assert.Equal("rolledBack", (await rollbackDb.ReviewCopyJobs.SingleAsync()).State);
+        Assert.All(await rollbackDb.Songs.AsNoTracking().ToArrayAsync(), s => {
+            Assert.Null(s.Genre); Assert.False(s.IsManuallyApproved); Assert.Null(s.ReviewPlanId);
+        });
+        Assert.All(job.Tracks, t => {
+            Assert.Equal(File.ReadAllBytes(t.BackupPath), File.ReadAllBytes(t.DestinationPath));
+            Assert.True(File.Exists(t.BackupPath + ".replacement"));
+        });
     }
 
     [PostgresFact]
@@ -401,6 +451,69 @@ public sealed class ReviewCopyJobTests : IDisposable
         Assert.Equal(bytes, File.ReadAllBytes(path));
         Assert.Contains(Path.GetFileName(path), Directory.GetFiles(Path.GetDirectoryName(path)!).Select(Path.GetFileName));
         Assert.Equal("rolledBack", (await resumed.ReviewCopyJobs.SingleAsync()).State);
+    }
+
+    [PostgresFact]
+    public async Task CopyReceiptDatesSurvivePersistence_WithoutChangingJobOrGeneration()
+    {
+        await using var store = await Store.CreateAsync(); var song = await AddSong(store.Db);
+        var plan = await Plan(store.Db, [song], new { Genre = "Reviewed" });
+        await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, plan.Id, plan.Revision, default);
+        var job = await store.Db.ReviewCopyJobs.Include(j => j.Tracks).SingleAsync();
+        var at = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddTicks(1234567);
+        job.CreatedAtUtc = at; job.UpdatedAtUtc = at.AddTicks(12); job.Tracks.Single().UpdatedAtUtc = at.AddTicks(24);
+        await store.Db.SaveChangesAsync();
+        var before = await ReviewCopyJobs.GetAsync(store.Db, files, Owner, job.Id, default);
+        await using var restarted = NewDb(store);
+        var after = await ReviewCopyJobs.GetAsync(restarted, files, Owner, job.Id, default);
+        Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(after));
+        Assert.Equal(0, before.CreatedAtUtc.Ticks % 10); Assert.Equal(0, before.UpdatedAtUtc.Ticks % 10);
+        Assert.Equal(0, before.Tracks.Single().UpdatedAtUtc.Ticks % 10);
+    }
+
+    [PostgresTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ApprovalChangedByOneMicrosecond_IsStillALaterCorrection(bool published)
+    {
+        await using var store = await Store.CreateAsync(); var song = await AddSong(store.Db);
+        var plan = await Plan(store.Db, [song], new { Genre = "Reviewed" });
+        var applied = await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, plan.Id, plan.Revision, default);
+        if (published) await Processor(store.Db).RunNextAsync(default);
+        await using var changed = NewDb(store);
+        song = await changed.Songs.SingleAsync();
+        song.ManuallyApprovedAtUtc = song.ManuallyApprovedAtUtc!.Value.AddTicks(10);
+        await changed.SaveChangesAsync();
+        var bytes = File.ReadAllBytes(song.DestinationPath!);
+        await using var restarted = NewDb(store);
+        var current = await restarted.Songs.SingleAsync(); await ManualReviewMetadata.LoadAsync(restarted, [current]);
+        var track = await restarted.ReviewCopyTracks.SingleAsync();
+        Assert.False(ReviewCopyJobs.Matches(current, track.AfterJson));
+        if (!published)
+        {
+            Assert.True(await Processor(restarted).RunNextAsync(default));
+            Assert.Equal("plan_superseded", (await restarted.ReviewCopyTracks.SingleAsync()).FailureCode);
+        }
+        var error = await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewCopyRollback.RunAsync(restarted, files, Owner, applied.JobId!.Value, default));
+        Assert.Equal("later_correction", error.Error.Code);
+        Assert.Equal(bytes, File.ReadAllBytes(song.DestinationPath!));
+    }
+
+    [PostgresFact]
+    public async Task ReleasedPublicationGate_CanBeImmediatelyReacquired()
+    {
+        await using var store = await Store.CreateAsync();
+        await using var competing = NewDb(store);
+        for (var n = 0; n < 30; n++)
+        {
+            var guard = await ReviewWriteGuard.AcquireAsync(store.Db, false, default);
+            Assert.NotNull(guard);
+            Assert.Null(await ReviewWriteGuard.AcquireAsync(competing, false, default));
+            await guard.DisposeAsync();
+            var next = await ReviewWriteGuard.AcquireAsync(competing, false, default);
+            Assert.NotNull(next);
+            await next.DisposeAsync();
+        }
     }
 
     private async Task<SongMetadata> AddSong(MusicHoarderDbContext db, string fixture = "silence.flac", int number = 1)

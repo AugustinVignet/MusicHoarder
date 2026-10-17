@@ -81,7 +81,8 @@ public sealed class TargetedRetryTests : IDisposable
         await using var store = await Store.CreateAsync(); var songs = await AddSongs(store.Db, 2);
         var request = Request(songs.Select(s => s.Id).ToArray());
         var first = await TargetedRetryService.CreateAsync(store.Db, files, Owner, request, default);
-        var again = await TargetedRetryService.CreateAsync(store.Db, files, Owner, request with { SongIds = request.SongIds.Reverse().ToArray() }, default);
+        await using var restarted = NewDb(store);
+        var again = await TargetedRetryService.CreateAsync(restarted, files, Owner, request with { SongIds = request.SongIds.Reverse().ToArray() }, default);
         Assert.Equal(JsonSerializer.Serialize(first), JsonSerializer.Serialize(again));
         var changed = await Assert.ThrowsAsync<ReviewPlanException>(() => TargetedRetryService.CreateAsync(store.Db, files, Owner,
             request with { RecomputeSuccessful = true }, default));
@@ -90,6 +91,24 @@ public sealed class TargetedRetryTests : IDisposable
         var replay = await TargetedRetryService.CreateAsync(store.Db, files, Owner, request, default);
         Assert.Equal(first.Id, replay.Id); Assert.Equal("completed", replay.State); Assert.Equal(2, fp.Calls);
         Assert.False(await Processor(store.Db, fp).RunNextAsync(default));
+    }
+
+    [PostgresFact]
+    public async Task ReceiptDatesAreIdenticalBeforeAndAfterPersistence_WithSubmicrosecondClock()
+    {
+        await using var store = await Store.CreateAsync(); var song = (await AddSongs(store.Db, 1)).Single();
+        var at = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddTicks(1234567);
+        var job = new TargetedRetryJob { Id = Guid.NewGuid(), OwnerUserId = Owner, RequestId = Guid.NewGuid(),
+            CreatedAtUtc = at, UpdatedAtUtc = at.AddTicks(12), Items = [new() { SongId = song.Id, Stage = "fingerprint",
+                StartedAtUtc = at.AddTicks(23), CompletedAtUtc = at.AddTicks(34) }] };
+        var before = TargetedRetryService.Result(job);
+        store.Db.TargetedRetryJobs.Add(job); await store.Db.SaveChangesAsync();
+        await using var restarted = NewDb(store);
+        var after = await TargetedRetryService.GetAsync(restarted, Owner, job.Id, default);
+        Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(after));
+        Assert.Equal(0, before.CreatedAtUtc.Ticks % 10); Assert.Equal(0, before.UpdatedAtUtc.Ticks % 10);
+        Assert.Equal(0, before.Items.Single().StartedAtUtc!.Value.Ticks % 10);
+        Assert.Equal(0, before.Items.Single().CompletedAtUtc!.Value.Ticks % 10);
     }
 
     [PostgresTheory]
