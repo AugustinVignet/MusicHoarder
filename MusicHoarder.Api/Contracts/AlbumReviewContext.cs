@@ -1,9 +1,11 @@
+using System.Text.Json.Serialization;
+
 namespace MusicHoarder.Api.Contracts;
 
 /// <summary>Read-only selection. Froms are exact POSIX source parents, never prefixes.
 /// Null TargetSongIds selects all their members; a supplied list selects an explicit subset.
 /// Context neighbors never become selected targets or an established musical program.</summary>
-public sealed record AlbumReviewContextRequest(string[] Froms, int[]? TargetSongIds = null);
+public sealed record AlbumReviewContextRequest(string[] Froms, int[]? TargetSongIds = null, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AlbumAuditScope? Audit = null);
 
 public sealed record AlbumReviewGroup(
     string From, int AnchorSongId, int TrackCount, int RemainingCount,

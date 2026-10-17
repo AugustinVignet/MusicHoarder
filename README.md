@@ -442,3 +442,6 @@ It does not change automatic matching or approve musical decisions.
 Exact metadata previews, explicit unknowns, concurrency and the pending verified-copy
 stage are documented in [Review plans](docs/REVIEW_PLANS.md). Lot B does not start
 copy jobs; applied metadata waits for the verified build workflow in lot C.
+
+Developer API: [explicit album audit contexts and bounded B scopes](docs/album-audit.md)
+(stage E; independent acceptance is required before integration).

@@ -1,4 +1,5 @@
 using System.IO.Abstractions;
+using System.Linq.Expressions;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -157,6 +158,22 @@ internal static class AlbumReviewContextReader
             if (members.Count == before) break;
         }
 
+        return await EvidenceAsync(db, files, owner, members, reasons, targetIds, froms, links, ct, request.TargetSongIds is null ? "exactFromMembers" : "explicitTracks");
+
+        void Add(SongMetadata song, string reason)
+        {
+            members.TryAdd(song.Id, song);
+            if (!reasons.TryGetValue(song.Id, out var set)) reasons[song.Id] = set = new(StringComparer.Ordinal);
+            set.Add(reason);
+            CheckTrackLimit(members.Count);
+        }
+    }
+
+    internal static async Task<AlbumReviewContext> EvidenceAsync(
+        MusicHoarderDbContext db, IFileSystem files, Guid owner, Dictionary<int, SongMetadata> members,
+        Dictionary<int, SortedSet<string>> reasons, int[] targetIds, string[] froms,
+        List<SongDuplicateLink> links, CancellationToken ct, string selectionKind = "explicitTracks", bool includePrograms = true, bool preserveOwnedKeeper = false)
+    {
         var allIds = members.Keys.Order().ToArray();
         var changes = await db.SongMetadataChanges.AsNoTracking()
             .Where(c => allIds.Contains(c.SongId) && c.Song.OwnerUserId == owner && TagFields.Contains(c.FieldName))
@@ -169,6 +186,12 @@ internal static class AlbumReviewContextReader
             song.ManualReviewValues = changes.Where(c => c.SongId == song.Id && c.Source == ManualReviewMetadata.Source
                 && c.AppliedAtUtc == song.ManuallyApprovedAtUtc && c.RevertedAtUtc == null)
                 .GroupBy(c => c.FieldName).ToDictionary(g => g.Key, g => g.MaxBy(c => c.Id)!.NewValue);
+        var visibleKeepers = members.Keys.ToHashSet();
+        if (preserveOwnedKeeper)
+        {
+            var keeperIds = members.Values.Where(s => s.DuplicateOfId.HasValue).Select(s => s.DuplicateOfId!.Value).Distinct().ToArray();
+            visibleKeepers.UnionWith(await db.Songs.AsNoTracking().Where(s => s.OwnerUserId == owner && s.DeletedAtUtc == null && keeperIds.Contains(s.Id)).Select(s => s.Id).ToArrayAsync(ct));
+        }
         var tracks = members.Values.OrderBy(s => s.Id).Select(s => new AlbumReviewTrack(
             s.Id, Parent(s.SourcePath)!, s.SourcePath, s.FileName, reasons[s.Id].ToArray(),
             s.FileSizeBytes, s.LastModifiedUtc, s.MatchedBy, s.MatchConfidence, s.EnrichmentLastAttemptedAtUtc,
@@ -185,14 +208,14 @@ internal static class AlbumReviewContextReader
             changes.Where(c => c.SongId == s.Id).Select(c => new AlbumReviewChange(c.Id, c.FieldName, c.OldValue,
                 c.NewValue, c.Source, c.Confidence, c.CreatedAtUtc, c.AppliedAtUtc, c.RevertedAtUtc, c.ActorUserId, c.Reason, c.EvidenceReferencesJson, c.ReviewPlanRevision)).ToArray(),
             attempts.Where(a => a.SongId == s.Id).Select(Candidate).ToArray(), Warnings(s.MatchWarnings),
-            s.EnrichmentError != null, s.IsDuplicate, s.DuplicateOfId is { } keeper && members.ContainsKey(keeper) ? keeper : null,
+            s.EnrichmentError != null, s.IsDuplicate, s.DuplicateOfId is { } keeper && visibleKeepers.Contains(keeper) ? keeper : null,
             ObserveCopy(files, s), s.ReviewPlanId, s.IsSynthetic, s.IsUnreleased)).ToArray();
 
-        var programs = await ProgramsAsync(db, members.Values.ToArray(), ct);
+        IReadOnlyList<AlbumReviewProgram> programs = includePrograms ? await ProgramsAsync(db, members.Values.ToArray(), ct) : [];
         CheckEvidenceLimit(links.Count + changes.Count + attempts.Count + programs.Sum(p => p.Tracks.Count + p.Sources.Count + 1));
         var conflicts = Conflicts(tracks);
         var packet = new AlbumReviewContext("album-review-context-v1", "", default,
-            new(request.TargetSongIds is null ? "exactFromMembers" : "explicitTracks", froms, targetIds, false, "notEstablished"),
+            new(selectionKind, froms, targetIds, false, "notEstablished"),
             tracks, links.Select(l => new AlbumReviewDuplicate(l.Id, l.SongIdLow, l.SongIdHigh,
                 l.Status.ToString(), l.Confidence.ToString(), l.Reasons.ToString(), l.Similarity, l.DetectedAtUtc, l.DismissedAtUtc)).ToArray(),
             conflicts, programs, true, MaxTracks, MaxEvidenceRows, MaxResponseBytes);
@@ -206,13 +229,6 @@ internal static class AlbumReviewContextReader
         var revision = Convert.ToHexStringLower(hash.GetHashAndReset());
         return packet with { Revision = revision, ObservedAtUtc = DateTime.UtcNow };
 
-        void Add(SongMetadata song, string reason)
-        {
-            members.TryAdd(song.Id, song);
-            if (!reasons.TryGetValue(song.Id, out var set)) reasons[song.Id] = set = new(StringComparer.Ordinal);
-            set.Add(reason);
-            CheckTrackLimit(members.Count);
-        }
     }
 
     internal static string? Parent(string? path)
@@ -321,23 +337,39 @@ internal static class AlbumReviewContextReader
         var keys = songs.Select(s => new { Song = s, Artist = TitleNormalizer.NormalizeForSearch(s.AlbumArtist ?? s.Artist),
             Album = TitleNormalizer.NormalizeForSearch(s.Album) }).Where(k => k.Artist.Length > 0 && k.Album.Length > 0).ToArray();
         var result = new List<AlbumReviewProgram>();
-        foreach (var group in keys.GroupBy(k => new { k.Artist, k.Album }).OrderBy(g => g.Key.Artist, StringComparer.Ordinal).ThenBy(g => g.Key.Album, StringComparer.Ordinal))
+        var groups = keys.GroupBy(k => new { k.Artist, k.Album }).OrderBy(g => g.Key.Artist, StringComparer.Ordinal)
+            .ThenBy(g => g.Key.Album, StringComparer.Ordinal).ToArray();
+        Expression<Func<CanonicalAlbum, bool>> predicate = a => false;
+        foreach (var group in groups)
         {
-            var album = await db.CanonicalAlbums.AsNoTracking()
-                .SingleOrDefaultAsync(a => a.ArtistKey == group.Key.Artist && a.AlbumKey == group.Key.Album, ct);
+            var artist = group.Key.Artist; var title = group.Key.Album;
+            Expression<Func<CanonicalAlbum, bool>> term = a => a.ArtistKey == artist && a.AlbumKey == title;
+            var body = new ParameterReplacement(term.Parameters[0], predicate.Parameters[0]).Visit(term.Body);
+            predicate = Expression.Lambda<Func<CanonicalAlbum, bool>>(Expression.OrElse(predicate.Body, body), predicate.Parameters);
+        }
+        var albums = await db.CanonicalAlbums.AsNoTracking().Where(predicate).ToListAsync(ct);
+        var albumIds = albums.Select(a => a.Id).ToArray();
+        var allTracks = await db.CanonicalAlbumTracks.AsNoTracking().Where(t => albumIds.Contains(t.CanonicalAlbumId))
+            .OrderBy(t => t.CanonicalAlbumId).ThenBy(t => t.DiscNumber).ThenBy(t => t.TrackNumber).ThenBy(t => t.Id)
+            .Take(MaxEvidenceRows + 1).ToListAsync(ct);
+        CheckEvidenceLimit(allTracks.Count + albums.Count);
+        foreach (var group in groups)
+        {
+            var album = albums.SingleOrDefault(a => a.ArtistKey == group.Key.Artist && a.AlbumKey == group.Key.Album);
             if (album is null) continue;
-            var tracks = await db.CanonicalAlbumTracks.AsNoTracking().Where(t => t.CanonicalAlbumId == album.Id)
-                .OrderBy(t => t.DiscNumber).ThenBy(t => t.TrackNumber).ThenBy(t => t.Id)
-                .Select(t => new AlbumReviewProgramTrack(t.DiscNumber, t.TrackNumber, t.Title, t.DurationMs,
-                    t.MusicBrainzRecordingId, t.CorroboratingProviders, t.IsContested))
-                .Take(MaxEvidenceRows + 1).ToListAsync(ct);
-            CheckEvidenceLimit(tracks.Count + result.Sum(p => p.Tracks.Count + 1));
+            var tracks = allTracks.Where(t => t.CanonicalAlbumId == album.Id).Select(t => new AlbumReviewProgramTrack(
+                t.DiscNumber, t.TrackNumber, t.Title, t.DurationMs, t.MusicBrainzRecordingId, t.CorroboratingProviders, t.IsContested)).ToArray();
             var (state, sources) = ProgramSources(album.SourcesJson);
             result.Add(new(album.Id, group.Select(k => k.Song.Id).Order().ToArray(), "normalizedNameCacheOnly",
                 album.DisplayArtist, album.DisplayTitle, album.Year, album.Status.ToString(), album.FetchedAtUtc,
                 album.ResolvedTrackCount, album.TrackCountContested, state, sources, tracks));
         }
         return result;
+    }
+
+    private sealed class ParameterReplacement(ParameterExpression from, ParameterExpression to) : ExpressionVisitor
+    {
+        protected override Expression VisitParameter(ParameterExpression node) => node == from ? to : base.VisitParameter(node);
     }
 
     private static (string State, IReadOnlyList<AlbumReviewProgramSource> Sources) ProgramSources(string? json)

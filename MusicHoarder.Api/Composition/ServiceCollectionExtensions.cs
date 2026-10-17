@@ -270,6 +270,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ILibraryBuilderService, LibraryBuilderService>();
         services.AddScoped<Review.Copy.IReviewAudioCommandRunner>(sp => new Review.Copy.ReviewAudioCommandRunner(
             sp.GetRequiredService<IOptions<MusicEnricherOptions>>().Value.FfmpegPath));
+        services.AddSingleton<Review.AlbumAuditCursorCodec>();
         services.AddScoped<Review.Copy.ReviewCopyProcessor>();
         services.AddHostedService<Review.Copy.ReviewCopyBackgroundService>();
         services.AddScoped<Review.Retry.ITargetedEnrichmentRunner, Review.Retry.TargetedEnrichmentRunner>();
