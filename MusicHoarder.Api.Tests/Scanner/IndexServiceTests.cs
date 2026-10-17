@@ -127,6 +127,29 @@ public class IndexServiceTests : IDisposable
         Assert.Equal(acquired, row.AcquiredAtUtc);        // but the acquisition time stands still
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReviewPlan_ReindexRecordsChangedSourceFacts_WithoutReplacingApprovedMetadataOrCopies(bool automationHold)
+    {
+        var path = Path.Combine(tempDir, "track.mp3"); await File.WriteAllBytesAsync(path, [1, 2, 3]);
+        await using var db = NewContext(); var reviewed = Seed(path.Replace('\\', '/'));
+        reviewed.FileSizeBytes = 999; reviewed.Title = "Reviewed title"; reviewed.Year = null;
+        reviewed.EnrichmentStatus = EnrichmentStatus.Matched; reviewed.IsManuallyApproved = true;
+        reviewed.ManuallyApprovedAtUtc = DateTime.UtcNow; reviewed.ReviewPlanId = automationHold ? null : Guid.NewGuid(); reviewed.AutomationHeld = automationHold;
+        reviewed.LibraryBuildStatus = LibraryBuildStatus.AwaitingReviewBuild;
+        reviewed.DestinationPath = "/retained/current.mp3"; reviewed.PreviousDestinationPath = "/retained/previous.mp3";
+        db.Songs.Add(reviewed); await db.SaveChangesAsync();
+        var id = reviewed.ReviewPlanId;
+        await CreateService(db).IndexAsync(Guid.NewGuid(), tempDir);
+        var row = await db.Songs.IgnoreQueryFilters().SingleAsync();
+        Assert.Equal(3, row.FileSizeBytes); Assert.Equal(id, row.ReviewPlanId);
+        Assert.Equal("Reviewed title", row.Title); Assert.Null(row.Year);
+        Assert.True(row.IsManuallyApproved); Assert.Equal(EnrichmentStatus.Matched, row.EnrichmentStatus);
+        Assert.Equal(LibraryBuildStatus.AwaitingReviewBuild, row.LibraryBuildStatus);
+        Assert.Equal("/retained/current.mp3", row.DestinationPath); Assert.Equal("/retained/previous.mp3", row.PreviousDestinationPath);
+    }
+
     [Fact]
     public async Task Index_BackfillsAcquiredAtUtc_OnRowsPredatingTheColumn()
     {

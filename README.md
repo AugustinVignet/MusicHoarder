@@ -438,3 +438,7 @@ steps are required after a new image is deployed.
 The read-only album context extension, its typed API, limits and isolated test
 procedure are documented in [Album review context](docs/ALBUM_REVIEW_CONTEXT.md).
 It does not change automatic matching or approve musical decisions.
+
+Exact metadata previews, explicit unknowns, concurrency and the pending verified-copy
+stage are documented in [Review plans](docs/REVIEW_PLANS.md). Lot B does not start
+copy jobs; applied metadata waits for the verified build workflow in lot C.

@@ -21,6 +21,12 @@ public class SongMetadataChange
 
     public string? OldValue { get; set; }
     public string? NewValue { get; set; }
+    public Guid? ActorUserId { get; set; }
+    [MaxLength(1024)]
+    public string? Reason { get; set; }
+    public string? EvidenceReferencesJson { get; set; }
+    [MaxLength(64)]
+    public string? ReviewPlanRevision { get; set; }
 
     /// <summary>Provider name or "consensus" that produced the change.</summary>
     [MaxLength(64)]

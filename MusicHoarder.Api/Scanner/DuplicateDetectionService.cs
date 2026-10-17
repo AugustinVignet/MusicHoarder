@@ -203,6 +203,9 @@ public class DuplicateDetectionService(
             for (var i = 1; i < ranked.Count; i++)
             {
                 var dup = ranked[i];
+                // A reviewed album slot is independent of recording-level duplicate evidence.
+                // Keep the edge for inspection without retiring that explicit membership.
+                if (dup.ReviewPlanId.HasValue) continue;
                 currentDuplicateIds.Add(dup.Id);
 
                 if (!dup.IsDuplicate || dup.DuplicateOfId != best.Id)

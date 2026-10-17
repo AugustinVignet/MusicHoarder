@@ -1752,6 +1752,135 @@ public class LibraryBuilderServiceTests
         Assert.Equal("upgraded-bytes", fileSystem.File.ReadAllText(destinationPath));
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task ReviewPlan_HoldsCurrentAndPreviousCopy_AgainstABetterAutomaticCandidate(bool previous, bool automationHold)
+    {
+        var destination = "/dest/Artist/2026 - Album/01 - Track.mp3";
+        var fs = new MockFileSystem(new Dictionary<string, MockFileData>
+        {
+            ["/source/new.mp3"] = new("NEW-CANDIDATE"), [destination] = new("OLD-COPY")
+        });
+        await using var db = CreateDbContext();
+        var held = CreateMatchedSong("/source/old.mp3", 8, libraryBuildStatus: LibraryBuildStatus.AwaitingReviewBuild, year: 1990);
+        held.ReviewPlanId = automationHold ? null : Guid.NewGuid(); held.AutomationHeld = automationHold; held.IsManuallyApproved = true;
+        held.DestinationPath = previous ? "/dest/retained-other.mp3" : destination;
+        held.PreviousDestinationPath = previous ? destination : null;
+        var candidate = CreateMatchedSong("/source/new.mp3", 13);
+        db.Songs.AddRange(held, candidate); await db.SaveChangesAsync();
+        var tags = new RecordingTagWriter();
+        var result = await CreateService(db, fs, tags).ProcessNextBatchAsync(Guid.NewGuid());
+        Assert.Equal(0, result.Done); Assert.Empty(tags.Paths);
+        Assert.Equal("OLD-COPY", fs.File.ReadAllText(destination));
+        Assert.False(held.IsDuplicate); Assert.False(candidate.IsDuplicate);
+        Assert.Equal(LibraryBuildStatus.AwaitingReviewBuild, held.LibraryBuildStatus);
+        Assert.Equal(1990, held.Year);
+    }
+
+    [Fact]
+    public async Task ReviewPlan_AppliedAfterBatchSelection_PreventsAnyTrackCopy()
+    {
+        var fs = new MockFileSystem(new Dictionary<string, MockFileData> { ["/source/track.mp3"] = new("SOURCE") });
+        await using var db = CreateDbContext(); db.Songs.Add(CreateMatchedSong("/source/track.mp3", 6)); await db.SaveChangesAsync();
+        var tags = new RecordingTagWriter();
+        var scopes = new MutateFromSecondScopeFactory(db, tags, context =>
+        {
+            var song = context.Songs.First(); song.ReviewPlanId = Guid.NewGuid();
+            song.LibraryBuildStatus = LibraryBuildStatus.AwaitingReviewBuild; context.SaveChanges();
+        });
+        await CreateService(db, fs, tags, scopeFactoryOverride: scopes).ProcessNextBatchAsync(Guid.NewGuid());
+        Assert.Empty(tags.Paths);
+        Assert.Equal(LibraryBuildStatus.AwaitingReviewBuild, (await db.Songs.SingleAsync()).LibraryBuildStatus);
+        Assert.Single(fs.AllFiles);
+    }
+
+    [MusicHoarder.Api.Tests.Endpoints.PostgresTheory]
+    [InlineData("Copied")]
+    [InlineData("Tagged")]
+    public async Task ReviewApplyWhileLegacyBuilderHoldsPublicationGate_IsBusyBeforeAnyMutation(string buildCheckpoint)
+    {
+        await using var store = await MusicHoarder.Api.Tests.Endpoints.AlbumReviewContextTests.TestDatabase.CreateAsync();
+        const string source = "/source/track.mp3";
+        const string current = "/dest/Artist/2026 - Album/01 - Track.mp3";
+        const string previous = "/dest/retained/previous.mp3";
+        var files = new MockFileSystem(new Dictionary<string, MockFileData>
+        {
+            [source] = new("NEW-SOURCE"), [current] = new("OLD-COPY"), [previous] = new("OLDER-COPY")
+        });
+        var song = CreateMatchedSong(source, 10);
+        song.DestinationPath = current;
+        song.PreviousDestinationPath = previous;
+        store.Db.Songs.Add(song);
+        await store.Db.SaveChangesAsync();
+        var owner = song.OwnerUserId;
+        var scope = new MusicHoarder.Api.Contracts.AlbumReviewContextRequest(["/source"], [song.Id]);
+        var resolver = new DestinationPathResolver(Microsoft.Extensions.Options.Options.Create(
+            new MusicEnricherOptions { DestinationDirectory = "/dest" }));
+        Guid? appliedPlan = null;
+        var checkpoint = new AcceptanceTaggedCheckpoint(buildCheckpoint, async () =>
+        {
+            await using var reviewDb = new MusicHoarderDbContext(new DbContextOptionsBuilder()
+                .UseNpgsql(store.ConnectionString, pg => pg.EnableRetryOnFailure()).Options);
+            var context = await MusicHoarder.Api.Review.AlbumReviewContextReader.ReadAsync(reviewDb, files, owner, scope, default);
+            var fields = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("{\"Title\":\"Curated title\"}")!;
+            var request = new MusicHoarder.Api.Contracts.ReviewPlanRequest(scope, context.Revision,
+                "Independent acceptance: in-flight publication", ["fixture:publication-race"],
+                [new(song.Id, false, fields)]);
+            var plan = await MusicHoarder.Api.Review.ReviewPlanService.PreviewAsync(reviewDb, files, resolver, owner, request, default);
+            Assert.True(plan.CanApply);
+            var busy = await Assert.ThrowsAsync<MusicHoarder.Api.Review.ReviewPlanException>(() =>
+                MusicHoarder.Api.Review.ReviewPlanService.ApplyAsync(reviewDb, files, resolver, owner, plan.Id, plan.Revision, default));
+            Assert.Equal(409, busy.StatusCode); Assert.Equal("writer_busy", busy.Error.Code);
+            Assert.Equal("OLD-COPY", files.File.ReadAllText(current));
+            Assert.Equal("OLDER-COPY", files.File.ReadAllText(previous));
+            Assert.Empty(await reviewDb.SongMetadataChanges.ToArrayAsync());
+            Assert.Empty(await reviewDb.ReviewCopyJobs.ToArrayAsync());
+            Assert.Null((await reviewDb.ReviewPlans.AsNoTracking().SingleAsync()).AppliedAtUtc);
+            appliedPlan = plan.Id; // preview only, deliberately not applied while writer holds the gate
+
+        });
+        await using var writerDb = new MusicHoarderDbContext(new DbContextOptionsBuilder()
+            .UseNpgsql(store.ConnectionString, pg => pg.EnableRetryOnFailure()).AddInterceptors(checkpoint).Options);
+        var error = await Record.ExceptionAsync(async () =>
+            await CreateService(writerDb, files, new RecordingTagWriter(), enableAlbumIdentityReconciliation: false)
+                .ProcessNextBatchAsync(Guid.NewGuid()));
+        store.Db.ChangeTracker.Clear();
+        var retained = await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == song.Id);
+        Assert.True(checkpoint.Fired);
+        Assert.NotNull(appliedPlan);
+        Assert.Null(error);
+        Assert.Null(retained.ReviewPlanId);
+        Assert.Equal(LibraryBuildStatus.Done, retained.LibraryBuildStatus);
+        // Once the native operation finishes, a freshly reviewed plan applies and is queued once.
+        var context = await MusicHoarder.Api.Review.AlbumReviewContextReader.ReadAsync(store.Db, files, owner, scope, default);
+        var request = new MusicHoarder.Api.Contracts.ReviewPlanRequest(scope, context.Revision, "After native writer", ["fixture:gate"],
+            [new(song.Id, false, JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("{\"Title\":\"Curated title\"}")!)]);
+        var next = await MusicHoarder.Api.Review.ReviewPlanService.PreviewAsync(store.Db, files, resolver, owner, request, default);
+        var receipt = await MusicHoarder.Api.Review.ReviewPlanService.ApplyAsync(store.Db, files, resolver, owner, next.Id, next.Revision, default);
+        Assert.NotNull(receipt.JobId);
+        Assert.Single(await store.Db.ReviewCopyJobs.ToArrayAsync());
+    }
+
+    private sealed class AcceptanceTaggedCheckpoint(string buildCheckpoint, Func<Task> apply) : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
+    {
+        internal bool Fired { get; private set; }
+        public override async ValueTask<int> SavedChangesAsync(
+            Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesCompletedEventData eventData,
+            int result, CancellationToken cancellationToken = default)
+        {
+            if (!Fired && eventData.Context!.ChangeTracker.Entries<SongMetadata>()
+                    .Any(e => e.Entity.LibraryBuildStatus.ToString() == buildCheckpoint && e.Entity.ReviewPlanId == null))
+            {
+                Fired = true;
+                await apply();
+            }
+            return result;
+        }
+    }
+
     private static LibraryBuilderService CreateService(
         MusicHoarderDbContext db,
         IFileSystem fileSystem,

@@ -1,10 +1,14 @@
 using System.Data;
+using Microsoft.AspNetCore.Mvc;
 using System.IO.Abstractions;
 using Microsoft.EntityFrameworkCore;
 using MusicHoarder.Api.Auth;
+using MusicHoarder.Api.Auth.EndpointFilters;
+using MusicHoarder.Api.Library;
 using MusicHoarder.Api.Contracts;
 using MusicHoarder.Api.Persistence;
 using MusicHoarder.Api.Review;
+using MusicHoarder.Api.Review.Copy;
 
 namespace MusicHoarder.Api.Endpoints;
 
@@ -21,7 +25,60 @@ public static class AlbumReviewEndpoints
             .WithSummary("Read all evidence for an explicit selection and its owned neighbors. No provider calls or writes.")
             .Produces<AlbumReviewContext>().Produces<AlbumReviewError>(400)
             .Produces<AlbumReviewError>(404).Produces<AlbumReviewError>(413).Produces(401);
-        return app;
+        app.MapPost("/api/review/plans/preview", PreviewPlan).RequireAdmin()
+            .WithName("PreviewReviewPlan").WithTags("Album review")
+            .WithSummary("Persist an exact metadata preview; no track or copy is changed.")
+            .Produces<ReviewPlanPreview>().Produces<ReviewPlanError>(400).Produces<ReviewPlanError>(409)
+            .Produces<ReviewPlanError>(413).Produces(401).Produces(403);
+        app.MapGet("/api/review/plans/{id:guid}", GetPlan).RequireAdmin()
+            .WithName("GetReviewPlan").WithTags("Album review").Produces<ReviewPlanPreview>().Produces(404);
+        app.MapPost("/api/review/plans/{id:guid}/apply", ApplyPlan).RequireAdmin()
+            .WithName("ApplyReviewPlan").WithTags("Album review")
+            .WithSummary("Apply exact metadata and atomically queue a targeted verified copy job.")
+            .Produces<ReviewPlanResult>().Produces<ReviewPlanError>(409).Produces(404).Produces(401).Produces(403);
+        app.MapGet("/api/review/jobs/{id:guid}", GetJob).RequireAdmin()
+            .WithName("GetVerifiedReviewJob").WithTags("Album review").Produces<ReviewCopyJobResult>();
+        app.MapPost("/api/review/jobs/{id:guid}/retry", RetryJob).RequireAdmin()
+            .WithName("RetryVerifiedReviewJob").WithTags("Album review").Produces<ReviewCopyJobResult>();
+        app.MapPost("/api/review/jobs/{id:guid}/rollback", RollbackJob).RequireAdmin()
+            .WithName("RollbackVerifiedReviewJob").WithTags("Album review").Produces<ReviewCopyJobResult>();
+        return app.MapTargetedRetryEndpoints();
+    }
+
+    internal static Task<IResult> GetJob(Guid id, MusicHoarderDbContext db, ICurrentUserAccessor user,
+        IFileSystem files, [FromServices] IReviewAudioCommandRunner runner, CancellationToken ct)
+        => PlanResult(user, () => ReviewCopyJobs.GetAsync(db, files, user.UserId, id, ct, runner));
+    internal static Task<IResult> RetryJob(Guid id, MusicHoarderDbContext db, ICurrentUserAccessor user,
+        IFileSystem files, CancellationToken ct) => PlanResult(user, async () =>
+    {
+        await ReviewCopyJobs.RetryAsync(db, user.UserId, id, ct);
+        return await ReviewCopyJobs.GetAsync(db, files, user.UserId, id, ct);
+    });
+    internal static Task<IResult> RollbackJob(Guid id, MusicHoarderDbContext db, ICurrentUserAccessor user,
+        IFileSystem files, CancellationToken ct) => PlanResult(user, async () =>
+    {
+        await ReviewCopyRollback.RunAsync(db, files, user.UserId, id, ct);
+        return await ReviewCopyJobs.GetAsync(db, files, user.UserId, id, ct);
+    });
+
+    internal static Task<IResult> PreviewPlan(ReviewPlanRequest request, MusicHoarderDbContext db,
+        ICurrentUserAccessor user, IFileSystem files, [FromServices] IDestinationPathResolver resolver, CancellationToken ct)
+        => PlanResult(user, () => ReviewPlanService.PreviewAsync(db, files, resolver, user.UserId, request, ct));
+
+    internal static Task<IResult> GetPlan(Guid id, MusicHoarderDbContext db, ICurrentUserAccessor user, CancellationToken ct)
+        => PlanResult(user, () => ReviewPlanService.GetAsync(db, user.UserId, id, ct));
+
+    internal static Task<IResult> ApplyPlan(Guid id, ReviewPlanApplyRequest request, MusicHoarderDbContext db,
+        ICurrentUserAccessor user, IFileSystem files, [FromServices] IDestinationPathResolver resolver, CancellationToken ct)
+        => PlanResult(user, () => ReviewPlanService.ApplyAsync(db, files, resolver, user.UserId, id, request.Revision, ct, request.RequestId));
+
+    private static async Task<IResult> PlanResult<T>(ICurrentUserAccessor user, Func<Task<T>> action)
+    {
+        if (user.User is null) return Results.Unauthorized();
+        if (!user.User.Can(Capability.Administer)) return Results.Forbid();
+        try { return Results.Ok(await action()); }
+        catch (ReviewPlanException e) { return Results.Json(e.Error, statusCode: e.StatusCode); }
+        catch (AlbumReviewReadException e) { return Results.Json(e.Error, statusCode: e.StatusCode); }
     }
 
     internal static async Task<IResult> Search(

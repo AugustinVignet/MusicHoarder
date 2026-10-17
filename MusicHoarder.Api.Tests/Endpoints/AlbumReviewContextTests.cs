@@ -444,13 +444,13 @@ public sealed class AlbumReviewContextTests
         changes = await db.SongMetadataChanges.AsNoTracking().OrderBy(c => c.Id).Select(c => new { c.Id, c.NewValue, c.AppliedAtUtc }).ToArrayAsync()
     });
 
-    private sealed class TestDatabase : IAsyncDisposable
+    internal sealed class TestDatabase : IAsyncDisposable
     {
         public required MusicHoarderDbContext Db { get; init; }
         public required string ConnectionString { get; init; }
         public required string AdminConnection { get; init; }
         public required string Name { get; init; }
-        public static async Task<TestDatabase> CreateAsync()
+        public static async Task<TestDatabase> CreateAsync(bool migrate = false)
         {
             var config = new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("MH_REVIEW_TEST_POSTGRES"));
             if (config.Database != "mh_review_test" || !(config.Host == "localhost" || config.Host == "127.0.0.1" || config.Host!.StartsWith('/')))
@@ -468,7 +468,7 @@ public sealed class AlbumReviewContextTests
             config.Pooling = false;
             var db = new MusicHoarderDbContext(new DbContextOptionsBuilder()
                 .UseNpgsql(config.ConnectionString, pg => pg.EnableRetryOnFailure()).Options);
-            try { await db.Database.EnsureCreatedAsync(); }
+            try { if (migrate) await db.Database.MigrateAsync(); else await db.Database.EnsureCreatedAsync(); }
             catch { await db.DisposeAsync(); throw; }
             return new() { Db = db, ConnectionString = config.ConnectionString, AdminConnection = admin, Name = name };
         }
