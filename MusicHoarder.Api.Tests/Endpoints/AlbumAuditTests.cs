@@ -79,25 +79,25 @@ public sealed class AlbumAuditTests
         await using var observed = new MusicHoarderDbContext(new DbContextOptionsBuilder()
             .UseNpgsql(store.ConnectionString).AddInterceptors(trace).Options);
         var allocatedBefore = GC.GetTotalAllocatedBytes(true);
-        var firstMeasured = await AlbumAuditReader.InventoryAsync(observed, Owner, null, null, 1, null, default);
+        var firstMeasured = Value<AlbumAuditInventory>(await AlbumAuditEndpoints.Groups(observed, User, default, limit: 1));
         Assert.Equal(3, trace.Statements.Count);
         Assert.All(trace.Statements, sql => { Assert.DoesNotContain("Lyrics", sql); Assert.DoesNotContain("Fingerprint", sql); });
         Console.WriteLine($"E24 first page: SQL={trace.Statements.Count}, allocatedBytes={GC.GetTotalAllocatedBytes(true) - allocatedBefore}, responseBytes={JsonSerializer.SerializeToUtf8Bytes(firstMeasured).Length}");
         var clock = Stopwatch.StartNew();
         var maxPageBytes = 0;
-        var first = await AlbumAuditReader.InventoryAsync(store.Db, Owner, null, null, 100, null, default);
+        var first = Value<AlbumAuditInventory>(await AlbumAuditEndpoints.Groups(store.Db, User, default, limit: 100));
         var seen = first.Groups.Select(g => g.GroupKey).ToHashSet(StringComparer.Ordinal);
         var page = first;
         while (page.NextCursor is { } cursor)
         {
-            page = await AlbumAuditReader.InventoryAsync(store.Db, Owner, null, null, 100, cursor, default);
+            page = Value<AlbumAuditInventory>(await AlbumAuditEndpoints.Groups(store.Db, User, default, limit: 100, cursor: cursor));
             Assert.All(page.Groups, g => Assert.True(seen.Add(g.GroupKey)));
             maxPageBytes = Math.Max(maxPageBytes, JsonSerializer.SerializeToUtf8Bytes(page).Length);
             Assert.True(maxPageBytes < 250000);
         }
         Assert.Equal(10013, seen.Count); Assert.Empty(store.Db.ChangeTracker.Entries());
         await store.Db.Songs.Where(s => s.Id == 1).ExecuteUpdateAsync(s => s.SetProperty(x => x.PlayCount, 10).SetProperty(x => x.LikedAtUtc, Stamp));
-        Assert.Equal(first.InventoryRevision, (await AlbumAuditReader.InventoryAsync(store.Db, Owner, null, null, 1, null, default)).InventoryRevision);
+        Assert.Equal(first.InventoryRevision, Value<AlbumAuditInventory>(await AlbumAuditEndpoints.Groups(store.Db, User, default, limit: 1)).InventoryRevision);
         Console.WriteLine($"E24 SQL keyset 10013 groups: {clock.ElapsedMilliseconds} ms; tracked entities=0; maximum page bytes={maxPageBytes}; no filesystem dependency.");
     }
 
@@ -373,6 +373,15 @@ public sealed class AlbumAuditTests
         var evidenceRoot = Environment.GetEnvironmentVariable("MH_AUDIT_TEST_EVIDENCE");
         if (!string.IsNullOrEmpty(evidenceRoot)) { Directory.CreateDirectory(evidenceRoot); await File.WriteAllTextAsync(Path.Combine(evidenceRoot, "e-openapi.json"), openApi); }
         await app.StopAsync();
+    }
+
+    [Fact]
+    public void ProtectedCursorsStayBoundedForDeepUnicodeAndQuotedKeys()
+    {
+        var payload = JsonSerializer.Serialize(new { key = new string('<', 1200) + new string('é', 600) + "\"quoted\"" });
+        var codec = AlbumAuditCursorCodec.ForTests; var token = codec.Protect(payload);
+        Assert.True(token.Length <= 8192); Assert.Equal(payload, codec.Unprotect(token));
+        Assert.Equal(413, Assert.Throws<AlbumReviewReadException>(() => codec.Protect(new string('x', 32769))).StatusCode);
     }
 
     private sealed class SnapshotRetry : DbCommandInterceptor

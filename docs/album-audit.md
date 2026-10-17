@@ -27,7 +27,9 @@ source/destination parents and the context read reference avoid unbounded path
 arrays. The context returns exact paths for selected members. Candidate group
 hints use the summary's exact displayed credit/album only, capped at eight with
 an exact count and `candidatesComplete`. They are navigation suggestions, not
-musical membership; a heterogeneous From may have additional identities. Context
+musical membership; a heterogeneous From may have additional identities.
+Only nine catalog keys are unnested to return eight hints, avoiding full
+peer-list expansion for every summary of a large homonymous collection. Context
 performs full relationship discovery from the explicit chosen member IDs.
 
 PostgreSQL aggregates the narrow navigation projection and its digest. Window
@@ -40,7 +42,10 @@ paths, searchable labels, enrichment/build statuses; it excludes likes, plays,
 and response time. The short REPEATABLE READ / READ ONLY transaction lives inside
 the Npgsql execution strategy. Cursor protection uses the native persisted Data
 Protection key ring with a separate purpose and binds owner, filters, revision,
-and last key. A malformed/foreign/changed-filter cursor is 400; revision drift is
+and last key. Payload compression keeps deeply quoted/Unicode paths within
+8192 characters; decompression is capped at 32768 bytes. An unrepresentable
+stored key returns explicit 413 rather than an unusable continuation.
+A malformed/foreign/changed-filter cursor is 400; revision drift is
 409 `inventory_changed`. Restart from a fresh first page after drift.
 
 ## Explicit program context

@@ -97,7 +97,7 @@ internal static class AlbumAuditReader
             catalogs AS (SELECT artist, album, array_agg(key ORDER BY key COLLATE "C") keys FROM identities GROUP BY artist, album)
             SELECT s.key AS "Key", candidate AS "CandidateKey", (cardinality(c.keys) - CASE WHEN s.key = ANY(c.keys) THEN 1 ELSE 0 END)::int AS "Count"
             FROM seeds s JOIN catalogs c ON c.artist = s.artist AND c.album = s.album
-            CROSS JOIN LATERAL (SELECT k AS candidate FROM unnest(c.keys) k WHERE k <> s.key LIMIT 8) candidates
+            CROSS JOIN LATERAL (SELECT k AS candidate FROM unnest(c.keys[1:9]) k WHERE k <> s.key LIMIT 8) candidates
             ORDER BY s.key COLLATE "C", candidate COLLATE "C"
             """, P("owner", owner), P("seeds", seedsJson)).ToListAsync(ct);
         var groups = rows.Take(limit).Select(r => new AlbumAuditGroup(r.Key, r.Kind, r.Count, r.Ids,
