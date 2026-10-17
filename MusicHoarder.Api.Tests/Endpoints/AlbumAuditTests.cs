@@ -207,7 +207,7 @@ public sealed class AlbumAuditTests
         Assert.Contains(duplicate.Facts, f => f.Kind == "uncoveredReferencePosition" && f.TrackNumber == 8);
         var referencePlanRequest = Plan(await Read(store.Db, Enumerable.Range(1, 14).ToArray(), reference));
         var referencePlan = await ReviewPlanService.PreviewAsync(store.Db, Files, Resolver, Owner, referencePlanRequest, default);
-        canonical.TrackCountContested = true; await store.Db.SaveChangesAsync();
+        await store.Db.CanonicalAlbums.Where(a => a.Id == canonical.Id).ExecuteUpdateAsync(a => a.SetProperty(x => x.TrackCountContested, true));
         Assert.Equal("context_changed", (await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewPlanService.PreviewAsync(store.Db, Files, Resolver, Owner, referencePlanRequest, default))).Error.Code);
         Assert.Equal("plan_stale", (await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewPlanService.ApplyAsync(store.Db, Files, Resolver, Owner, referencePlan.Id, referencePlan.Revision, default))).Error.Code);
         var changed = await AlbumAuditEndpoints.Context(new([1], reference), store.Db, User, Files, default);
