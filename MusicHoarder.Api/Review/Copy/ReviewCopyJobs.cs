@@ -17,14 +17,21 @@ internal static class ReviewCopyJobs
     internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     internal static string Snapshot(SongMetadata song) => JsonSerializer.Serialize(new ReviewSongSnapshot(
         ReviewFields.Values(song).ToDictionary(p => p.Key, p => JsonSerializer.SerializeToElement(p.Value)),
-        song.ReviewPlanId, song.IsManuallyApproved, song.ManuallyApprovedAtUtc, song.EnrichmentStatus,
-        song.SourcePath, song.IsDuplicate, song.DuplicateOfId, song.ManualReviewValues.OrderBy(p => p.Key, StringComparer.Ordinal).ToDictionary(), song.LibraryBuildStatus, song.LibraryBuiltAtUtc), Json);
-    internal static ReviewSongSnapshot Read(string json) => JsonSerializer.Deserialize<ReviewSongSnapshot>(json, Json)!;
+        song.ReviewPlanId, song.IsManuallyApproved, ReviewTimestamp.Persisted(song.ManuallyApprovedAtUtc), song.EnrichmentStatus,
+        song.SourcePath, song.IsDuplicate, song.DuplicateOfId, song.ManualReviewValues.OrderBy(p => p.Key, StringComparer.Ordinal).ToDictionary(), song.LibraryBuildStatus, ReviewTimestamp.Persisted(song.LibraryBuiltAtUtc)), Json);
+    internal static ReviewSongSnapshot Read(string json)
+    {
+        var snapshot = JsonSerializer.Deserialize<ReviewSongSnapshot>(json, Json)!;
+        // Jobs recorded before C-R1 can contain 100 ns fractions. Normalize on read
+        // as well as on write so an existing stopped job can be retried or rolled back.
+        return snapshot with { ApprovedAtUtc = ReviewTimestamp.Persisted(snapshot.ApprovedAtUtc),
+            BuiltAtUtc = ReviewTimestamp.Persisted(snapshot.BuiltAtUtc) };
+    }
     internal static bool Matches(SongMetadata song, string json)
     {
         var expected = Read(json);
         var actual = Read(Snapshot(song)) with { BuildStatus = expected.BuildStatus, BuiltAtUtc = expected.BuiltAtUtc };
-        return JsonSerializer.Serialize(actual, Json) == json && !song.IsDeleted;
+        return JsonSerializer.Serialize(actual, Json) == JsonSerializer.Serialize(expected, Json) && !song.IsDeleted;
     }
 
     internal static async Task<ReviewCopyJob> EnqueueAsync(MusicHoarderDbContext db, IFileSystem files,
@@ -89,10 +96,10 @@ internal static class ReviewCopyJobs
                     or TagLib.UnsupportedFormatException or ArgumentException) { fresh = false; }
             }
         }
-        return new(job.Id, job.PlanId, job.RequestId, job.State, job.CreatedAtUtc, job.UpdatedAtUtc,
+        return new(job.Id, job.PlanId, job.RequestId, job.State, ReviewTimestamp.Persisted(job.CreatedAtUtc), ReviewTimestamp.Persisted(job.UpdatedAtUtc),
             job.RolledBackAtUtc is null, fresh, "notAssessed", job.Tracks.OrderBy(t => t.SongId).Select(t =>
                 new ReviewCopyTrackResult(t.SongId, t.State, t.Attempts, t.FailureStage, t.FailureCode,
-                    t.UpdatedAtUtc, t.DestinationPath, t.ProofJson != null, t.ProofJson)).ToArray());
+                    ReviewTimestamp.Persisted(t.UpdatedAtUtc), t.DestinationPath, t.ProofJson != null, t.ProofJson)).ToArray());
     }
     internal static async Task<ReviewCopyJob> OwnedAsync(MusicHoarderDbContext db, Guid owner, Guid id, CancellationToken ct)
         => await db.ReviewCopyJobs.Include(j => j.Tracks).SingleOrDefaultAsync(j => j.Id == id && j.OwnerUserId == owner, ct)

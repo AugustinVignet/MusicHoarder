@@ -89,6 +89,21 @@ internal sealed class ReviewWriteGuard : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (connection is null) foreach (var key in keys) Local[key].Release();
-        else await connection.DisposeAsync(); // releases the session lock, including exceptional paths
+        else
+        {
+            try
+            {
+                // Closing a socket can return before the backend has released its locks.
+                // Await the explicit unlock so the next Apply/replay is not spuriously busy.
+                if (connection.State == System.Data.ConnectionState.Open)
+                {
+                    await using var command = connection.CreateCommand();
+                    command.CommandText = "SELECT pg_advisory_unlock(k) FROM unnest(@keys) AS k";
+                    command.Parameters.AddWithValue("keys", keys);
+                    await command.ExecuteNonQueryAsync();
+                }
+            }
+            finally { await connection.DisposeAsync(); } // fail-closed session cleanup if unlock failed
+        }
     }
 }

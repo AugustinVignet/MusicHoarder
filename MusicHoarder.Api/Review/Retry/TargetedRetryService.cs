@@ -61,8 +61,9 @@ internal static class TargetedRetryService
         => Result(await db.TargetedRetryJobs.AsNoTracking().Include(j => j.Items).SingleOrDefaultAsync(j => j.OwnerUserId == owner && j.Id == id, ct)
             ?? throw Error(404, "retry_not_found", "Retry unavailable to this owner."));
     internal static TargetedRetryResult Result(TargetedRetryJob job) => new(job.Id, job.RequestId, job.State,
-        job.CreatedAtUtc, job.UpdatedAtUtc, job.Items.OrderBy(i => i.SongId).ThenBy(i => i.Ordinal)
-            .Select(i => new TargetedRetryItemResult(i.SongId, i.Stage, i.State, i.Code, i.InputSha256, i.StartedAtUtc, i.CompletedAtUtc)).ToArray());
+        ReviewTimestamp.Persisted(job.CreatedAtUtc), ReviewTimestamp.Persisted(job.UpdatedAtUtc), job.Items.OrderBy(i => i.SongId).ThenBy(i => i.Ordinal)
+            .Select(i => new TargetedRetryItemResult(i.SongId, i.Stage, i.State, i.Code, i.InputSha256,
+                ReviewTimestamp.Persisted(i.StartedAtUtc), ReviewTimestamp.Persisted(i.CompletedAtUtc))).ToArray());
 
     internal static async Task<PipelineFailuresPage> FailuresAsync(MusicHoarderDbContext db, Guid owner, string? stage,
         int offset, int limit, CancellationToken ct)
@@ -87,10 +88,10 @@ internal static class TargetedRetryService
         return await db.PipelineStageAttempts.AsNoTracking().Where(a => a.OwnerUserId == owner && a.SongId == songId && (stage == null || a.Stage == stage))
             .OrderByDescending(a => a.AttemptedAtUtc).ThenBy(a => a.Id).Skip(offset).Take(limit)
             .Select(a => new PipelineAttemptResult(a.Id, a.SongId, a.JobId, a.Stage, a.State, a.Code, a.ExitCode,
-                a.InputSha256, a.CandidateJson, a.AttemptedAtUtc, a.NextRetryAfterUtc)).ToArrayAsync(ct);
+                a.InputSha256, a.CandidateJson, ReviewTimestamp.Persisted(a.AttemptedAtUtc), ReviewTimestamp.Persisted(a.NextRetryAfterUtc))).ToArrayAsync(ct);
     }
     private static PipelineStageResult StateResult(PipelineStageState s) => new(s.SongId, s.Stage, s.State, s.Code, s.Attempts,
-        s.UpdatedAtUtc, s.NextRetryAfterUtc, s.InputSha256, s.CandidateJson, s.SourceWarningCode, s.SourceWarningInputSha256);
+        ReviewTimestamp.Persisted(s.UpdatedAtUtc), ReviewTimestamp.Persisted(s.NextRetryAfterUtc), s.InputSha256, s.CandidateJson, s.SourceWarningCode, s.SourceWarningInputSha256);
     private static async Task RequireSong(MusicHoarderDbContext db, Guid owner, int songId, CancellationToken ct)
     { if (!await db.Songs.AnyAsync(s => s.Id == songId && s.OwnerUserId == owner && s.DeletedAtUtc == null, ct)) throw Error(404, "track_unavailable", "Track unavailable to this owner."); }
     internal static async Task ResumeAutomationAsync(MusicHoarderDbContext db, IFileSystem files, Guid owner,

@@ -32,6 +32,13 @@ items additionally support failed, skipped, blocked, deferred, reviewRequired
 and qualificationRequired. A restart resumes pending/running work. A committed
 stage receipt is recovered without executing it again.
 
+Job/item dates and stage/attempt dates in public receipts use the same persisted
+microsecond representation as C snapshots (C-R1). The initial response and its
+SQL-reloaded replay serialize identically when state/content have not changed;
+null start/completion/deadline dates remain null. This does not freeze a running
+job's receipt: a real state transition still updates its result and timestamp.
+No schema change or rewrite of historic attempts is required.
+
 GET `/api/review/failures?stage=fingerprint&offset=0&limit=25` pages failures and
 unresolved source warnings, with hasMore. GET `/api/review/tracks/{id}/stages`
 returns current states, attempts, reason, date, optional deadline, input hash,
