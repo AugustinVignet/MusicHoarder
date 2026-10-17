@@ -30,7 +30,10 @@ an exact count and `candidatesComplete`. They are navigation suggestions, not
 musical membership; a heterogeneous From may have additional identities. Context
 performs full relationship discovery from the explicit chosen member IDs.
 
-PostgreSQL aggregates the narrow navigation projection and its digest. Three
+PostgreSQL aggregates the narrow navigation projection and its digest. Window
+counts and a filtered 200-ID aggregate avoid rescanning all units for each group.
+The audit read transaction disables JIT locally to avoid compilation cost for
+short evidence queries; no database-wide setting changes. Three
 queries per inventory page, no library entity materialization or per-track detail
 queries, no filesystem dependency. The revision includes primary membership,
 paths, searchable labels, enrichment/build statuses; it excludes likes, plays,

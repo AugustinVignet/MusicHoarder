@@ -69,21 +69,23 @@ internal static class AlbumAuditReader
         var inventory = await InventoryStateAsync(db, owner, ct);
         CheckRevision(prior, inventory.Revision, "inventory_changed");
         var rows = await db.Database.SqlQueryRaw<GroupRow>(InventorySql + """
-            , summaries AS MATERIALIZED (
-              SELECT key AS "Key", min(kind) AS "Kind", count(*)::int AS "Count",
-                min(artist) AS "Artist", min("Album") AS "Album", count(DISTINCT src)::int AS "FromCount",
-                count(DISTINCT dest)::int AS "DestinationCount", count(DISTINCT "Album")::int AS "AlbumCount",
-                count(DISTINCT artist)::int AS "ArtistCount", count(*) FILTER (WHERE "LibraryBuildStatus" = 3)::int AS "Built",
-                count(*) FILTER (WHERE dest IS NULL)::int AS "NoDestination",
-                md5(string_agg(md5(row("Id", "SourcePath", "DestinationPath", artist, "Album", "EnrichmentStatus", "LibraryBuildStatus")::text), '' ORDER BY "Id")) AS "Revision"
-              FROM units WHERE key COLLATE "C" > @last COLLATE "C" GROUP BY key
-              HAVING bool_or(strpos(lower(concat_ws(' ', key, artist, "Album", "Title", "OriginalTitle", "OriginalArtist", "OriginalAlbumArtist", "OriginalAlbum")), lower(@query)) > 0)
-                AND (@state = -1 OR bool_or("EnrichmentStatus" = @state))
-            ), page AS MATERIALIZED (SELECT * FROM summaries ORDER BY "Key" COLLATE "C" LIMIT @limit)
-            SELECT g.*, ARRAY(SELECT u."Id" FROM units u WHERE u.key = g."Key" ORDER BY u."Id" LIMIT 200) AS "Ids",
-              (SELECT jsonb_object_agg(t.state, t.n)::text FROM
-                (SELECT "EnrichmentStatus"::text state, count(*)::int n FROM units u WHERE u.key = g."Key" GROUP BY "EnrichmentStatus") t) AS "StatusJson"
-            FROM page g ORDER BY "Key" COLLATE "C"
+            , ranked AS (
+              SELECT *, row_number() OVER (PARTITION BY key ORDER BY "Id") rn,
+                (count(*) OVER (PARTITION BY key, "EnrichmentStatus"))::int state_count
+              FROM units WHERE key COLLATE "C" > @last COLLATE "C"
+            )
+            SELECT key AS "Key", min(kind) AS "Kind", count(*)::int AS "Count",
+              array_agg("Id" ORDER BY "Id") FILTER (WHERE rn <= 200) AS "Ids",
+              min(artist) AS "Artist", min("Album") AS "Album", count(DISTINCT src)::int AS "FromCount",
+              count(DISTINCT dest)::int AS "DestinationCount", count(DISTINCT "Album")::int AS "AlbumCount",
+              count(DISTINCT artist)::int AS "ArtistCount", count(*) FILTER (WHERE "LibraryBuildStatus" = 3)::int AS "Built",
+              count(*) FILTER (WHERE dest IS NULL)::int AS "NoDestination",
+              jsonb_object_agg("EnrichmentStatus"::text, state_count)::text AS "StatusJson",
+              md5(string_agg(md5(row("Id", "SourcePath", "DestinationPath", artist, "Album", "EnrichmentStatus", "LibraryBuildStatus")::text), '' ORDER BY "Id")) AS "Revision"
+            FROM ranked GROUP BY key
+            HAVING bool_or(strpos(lower(concat_ws(' ', key, artist, "Album", "Title", "OriginalTitle", "OriginalArtist", "OriginalAlbumArtist", "OriginalAlbum")), lower(@query)) > 0)
+              AND (@state = -1 OR bool_or("EnrichmentStatus" = @state))
+            ORDER BY key COLLATE "C" LIMIT @limit
             """, P("owner", owner), P("last", prior?.Key ?? ""), P("query", query ?? ""), P("state", state), P("limit", limit + 1)).ToListAsync(ct);
         // One bounded projection query for this page, not one detail query per track/group.
         // These are label-based navigation hints only. Complete dependency discovery is in context.
@@ -261,6 +263,8 @@ internal static class AlbumAuditReader
     {
         if (scope.Audit is not { Version: Version } audit || scope.Froms is null || scope.Froms.Length != 0 || scope.TargetSongIds is null || audit.MemberSongIds is null ||
             !scope.TargetSongIds.Order().SequenceEqual(audit.MemberSongIds.Order())) throw Bad("Invalid versioned bounded B scope.");
+        if (db.Database.CurrentTransaction is not null)
+            await db.Database.ExecuteSqlRawAsync("SET LOCAL jit = off", ct);
         return (await ReadAsync(db, files, owner, new(audit.MemberSongIds, audit.Reference), ct)).PlanPacket
             ?? throw new AlbumReviewReadException(409, "expand_context", "Blocking context exceeds 200 tracks. Review a narrower program; no plan can bypass these dependencies.", 200);
     }

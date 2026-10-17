@@ -49,6 +49,7 @@ public static class AlbumAuditEndpoints
             {
                 await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, token);
                 await db.Database.ExecuteSqlRawAsync("SET TRANSACTION READ ONLY", token);
+                await db.Database.ExecuteSqlRawAsync("SET LOCAL jit = off", token);
                 var packet = await action();
                 await tx.CommitAsync(token);
                 return packet;
