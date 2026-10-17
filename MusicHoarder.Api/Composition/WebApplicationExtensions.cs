@@ -26,6 +26,7 @@ public static class WebApplicationExtensions
         app.MapRunsEndpoints();
         app.MapHistoryEndpoints();
         app.MapSongsEndpoints();
+        app.MapAlbumReviewEndpoints();
         app.MapMusicVideoEndpoints();
         app.MapDuplicatesEndpoints();
         app.MapArtistDedupEndpoints();

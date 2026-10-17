@@ -45,6 +45,8 @@ public sealed partial class MemberWriteGuardMiddleware
     private static readonly WriteRule[] Rules =
     [
         Exact("POST", "/api/auth/logout"),
+        // Body-based, strictly read-only owner-scoped query; no mutation capability required.
+        Exact("POST", "/api/review/album-context"),
         Exact("POST", "/api/auth/device-token"),
         Prefix("POST", "/api/auth/webauthn/authenticate"),
         Prefix("POST", "/api/auth/webauthn/register"),

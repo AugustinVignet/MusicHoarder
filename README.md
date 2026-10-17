@@ -432,3 +432,9 @@ steps are required after a new image is deployed.
   semantic-release version.
 - **Security:** report vulnerabilities per [SECURITY.md](SECURITY.md).
 - **License:** [MIT](LICENSE).
+
+## Local album review API
+
+The read-only album context extension, its typed API, limits and isolated test
+procedure are documented in [Album review context](docs/ALBUM_REVIEW_CONTEXT.md).
+It does not change automatic matching or approve musical decisions.
