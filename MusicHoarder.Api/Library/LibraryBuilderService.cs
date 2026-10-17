@@ -69,6 +69,7 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
             || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.AlbumArtist)) ? []
             : variousArtists ? [VariousArtists] : BuildAlbumArtistArray(albumIdentity.AlbumArtist, song.Artist);
 
+        if (song.ReviewPlanId.HasValue) albumArtists = SingleOrEmpty(song.AlbumArtist);
         tag.Title = NullIfEmpty(song.Title);
         tag.Album = NullIfEmpty(albumIdentity.Album);
         // Singular ARTIST is the DISPLAY credit (Navidrome uses it as the display name when the
@@ -213,6 +214,7 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
             SetId3UserText(id3, "ARTISTS", artists);
             SetId3UserText(id3, "ALBUMARTISTS", albumArtists);
             SetId3UserText(id3, "MusicBrainz Album Type", releaseTypes);
+            if (song.ReviewPlanId.HasValue) SetId3UserText(id3, "RELEASETYPE_PRIMARY", SingleOrEmpty(song.ReleaseTypePrimary));
             SetId3Text(id3, "TCMP", compilation ? ["1"] : []);
             if (song.ReviewPlanId.HasValue || alignedArtistIds.Length > 0 || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.ArtistMusicBrainzIds))) SetId3UserText(id3, "MusicBrainz Artist Id", alignedArtistIds);
             SetId3Text(id3, "TPUB", label);                       // publisher / label
@@ -228,8 +230,10 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
         if (file.GetTag(TagLib.TagTypes.Xiph, false) is TagLib.Ogg.XiphComment xiph)
         {
             SetXiph(xiph, "ARTISTS", artists);
+            if (song.ReviewPlanId.HasValue) SetXiph(xiph, "ISRC", SingleOrEmpty(song.Isrc));
             SetXiph(xiph, "ALBUMARTISTS", albumArtists);
             SetXiph(xiph, "RELEASETYPE", releaseTypes);
+            if (song.ReviewPlanId.HasValue) SetXiph(xiph, "RELEASETYPE_PRIMARY", SingleOrEmpty(song.ReleaseTypePrimary));
             SetXiph(xiph, "COMPILATION", compilation ? ["1"] : []);
             if (song.ReviewPlanId.HasValue || alignedArtistIds.Length > 0 || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.ArtistMusicBrainzIds))) SetXiph(xiph, "MUSICBRAINZ_ARTISTID", alignedArtistIds);
             SetXiph(xiph, "LABEL", label);
@@ -249,6 +253,15 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
             SetDash(apple, "ARTISTS", artists);
             SetDash(apple, "ALBUMARTISTS", albumArtists);
             SetDash(apple, "MusicBrainz Album Type", releaseTypes);
+            if (song.ReviewPlanId.HasValue)
+            {
+                SetDash(apple, "RELEASETYPE_PRIMARY", SingleOrEmpty(song.ReleaseTypePrimary));
+                SetDash(apple, "RELEASEDATE", SingleOrEmpty(releaseDate));
+                SetDash(apple, "MusicBrainz Track Id", SingleOrEmpty(song.MusicBrainzId));
+                SetDash(apple, "MusicBrainz Album Id", SingleOrEmpty(song.MusicBrainzReleaseId));
+                SetDash(apple, "MusicBrainz Release Group Id", SingleOrEmpty(song.MusicBrainzReleaseGroupId));
+                SetDash(apple, "MusicBrainz Album Artist Id", SingleOrEmpty(song.AlbumArtistMusicBrainzId));
+            }
             if (ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.IsCompilation))) apple.SetData("cpil", Array.Empty<TagLib.Mpeg4.AppleDataBox>());
             else apple.IsCompilation = compilation;
             if (song.ReviewPlanId.HasValue || alignedArtistIds.Length > 0 || ManualReviewMetadata.IsExplicitUnknown(song, nameof(song.ArtistMusicBrainzIds))) SetDash(apple, "MusicBrainz Artist Id", alignedArtistIds);
@@ -266,30 +279,35 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
     private static string[] SingleOrEmpty(string? value)
         => NullIfEmpty(value) is string v ? [v] : [];
 
-    /// <summary>
-    /// Writes (or clears) an iTunes freeform dash atom, mirroring the empty-array handling of the
-    /// ID3/Xiph helpers above. TagLibSharp's <c>SetDashBoxes</c> dereferences <c>datastring[0]</c>
-    /// whenever the atom already exists, so calling it with an empty array on a re-tag throws
-    /// <see cref="IndexOutOfRangeException"/> — and the AppleTag branch, unlike ID3/Xiph, has no
-    /// guard of its own (issue #239). So: with no values, remove any existing atom instead of
-    /// writing; only call <c>SetDashBoxes</c> with a non-empty array.
-    /// </summary>
+    /// <summary>Replace every managed iTunes dash occurrence with one parent and N data values.
+    /// TagLibSharp 2.3.0's plural setter can add the same parent repeatedly and its getters can
+    /// hide later parents. Use the single setter to establish the parent, then add data children.</summary>
     private static void SetDash(TagLib.Mpeg4.AppleTag apple, string name, string[] values)
     {
         const string mean = "com.apple.iTunes";
-        if (values.Length == 0)
+        var old = Parents().ToArray();
+        if (old.Length > 4096) throw new InvalidDataException("Too many repeated native tag atoms.");
+        foreach (var parent in old)
         {
-            // GetDashBoxes returns null when the atom is absent. TagLibSharp stores a multi-value dash
-            // atom as one DASH box per value, and SetDashBox("") removes only a single box, so clear
-            // them one at a time until none remain (bounded so a non-progressing remove can't spin).
-            for (var guard = 0; apple.GetDashBoxes(mean, name)?.Length > 0 && guard < 64; guard++)
-            {
-                apple.SetDashBox(mean, name, string.Empty);
-            }
-            return;
+            // An empty malformed parent has no data for TagLib's remover to find. Supply a
+            // temporary empty child so the public remover can discard that entire parent too.
+            if (parent.GetChild("data") is null)
+                parent.AddChild(new TagLib.Mpeg4.AppleDataBox(new TagLib.ByteVector(), 1));
+            var actualName = ((TagLib.Mpeg4.AppleAdditionalInfoBox)parent.GetChild("name")).Text;
+            apple.SetDashBox(mean, actualName, string.Empty);
         }
+        if (Parents().Any()) throw new InvalidDataException("Unable to replace repeated native tag atoms.");
+        if (values.Length == 0) return;
+        apple.SetDashBox(mean, name, values[0]);
+        var canonical = Parents().Single();
+        foreach (var value in values.Skip(1))
+            canonical.AddChild(new TagLib.Mpeg4.AppleDataBox(
+                TagLib.ByteVector.FromString(value, TagLib.StringType.UTF8), 1));
 
-        apple.SetDashBoxes(mean, name, values);
+        IEnumerable<TagLib.Mpeg4.Box> Parents() => apple.Where(box => box.BoxType == "----"
+            && (box.GetChild("mean") as TagLib.Mpeg4.AppleAdditionalInfoBox)?.Text == mean
+            && string.Equals((box.GetChild("name") as TagLib.Mpeg4.AppleAdditionalInfoBox)?.Text,
+                name, StringComparison.OrdinalIgnoreCase));
     }
 
     private static void SetId3UserText(TagLib.Id3v2.Tag id3, string description, string[] values)
@@ -926,7 +944,9 @@ public class LibraryBuilderService(
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MusicHoarderDbContext>();
 
+        await using var writeGuard = await Review.Copy.ReviewWriteGuard.AcquireAsync(db, wait: true, ct);
         var song = await db.Songs.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.Id == songId, ct);
+        if (song is not null) await db.Entry(song).ReloadAsync(ct);
         if (song is null)
         {
             // Row vanished between the batch snapshot and here (only soft-delete is used, so this is rare).
@@ -975,8 +995,14 @@ public class LibraryBuilderService(
                     || (s.ReviewPlanId != null && s.PreviousDestinationPath == destinationPath)))
             .Select(s => (int?)s.Id)
             .FirstOrDefaultAsync(ct);
-        if (occupantId is { } occupant)
+        var foldedPath = destinationPath.ToLowerInvariant();
+        var retainedByReview = await db.ReviewCopyTracks.AnyAsync(t => t.SongId != songId
+            && (t.DestinationPath.ToLower() == foldedPath || t.BackupPath.ToLower() == foldedPath
+                || t.OldDestinationPath != null && t.OldDestinationPath.ToLower() == foldedPath
+                || t.OldPreviousPath != null && t.OldPreviousPath.ToLower() == foldedPath), ct);
+        if (occupantId is not null || retainedByReview)
         {
+            var occupant = occupantId ?? 0;
             logger.LogWarning(
                 "Refusing to build song {SongId} over {DestinationPath}: song {OccupantId} still holds that file",
                 songId, destinationPath, occupant);
@@ -1060,6 +1086,7 @@ public class LibraryBuilderService(
             // One overwrite-move rather than delete-then-move: for a released row re-tagged in place
             // the destination is the only copy of the audio, and a crash between a delete and the
             // move would lose it. Temp lives in the destination folder, so this is a plain rename.
+            await writeGuard!.CheckAsync(ct);
             fileSystem.File.Move(tempPath, destinationPath, overwrite: true);
             if (!string.IsNullOrWhiteSpace(song.PreviousDestinationPath)
                 && !PathsEqual(song.PreviousDestinationPath, destinationPath))

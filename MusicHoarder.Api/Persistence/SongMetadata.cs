@@ -983,6 +983,7 @@ public class SongMetadata
 
     public void MarkAsDuplicate(int duplicateOfId)
     {
+        if (ReviewPlanId.HasValue) return;
         IsDuplicate = true;
         DuplicateOfId = duplicateOfId;
     }

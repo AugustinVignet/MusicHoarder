@@ -35,6 +35,10 @@ public class MusicHoarderDbContext : DbContext
     }
 
     public DbSet<SongMetadata> Songs { get; set; } = null!;
+    public DbSet<ReviewCopyRequestKey> ReviewCopyRequestKeys { get; set; } = null!;
+    public DbSet<ReviewCopyJob> ReviewCopyJobs { get; set; } = null!;
+    public DbSet<ReviewCopyTrack> ReviewCopyTracks { get; set; } = null!;
+    public DbSet<ReviewAudioCacheEntry> ReviewAudioCache { get; set; } = null!;
     public DbSet<ReviewPlan> ReviewPlans { get; set; } = null!;
     public DbSet<SongDuplicateLink> SongDuplicateLinks { get; set; } = null!;
     public DbSet<ArtistAlias> ArtistAliases { get; set; } = null!;
@@ -93,6 +97,28 @@ public class MusicHoarderDbContext : DbContext
         var hasUser = _currentUser is not null;
         var userId = _currentUser?.UserId ?? Guid.Empty;
 
+        modelBuilder.Entity<ReviewCopyRequestKey>(entity =>
+        {
+            entity.HasKey(k => new { k.OwnerUserId, k.RequestId });
+            entity.HasOne<ReviewCopyJob>().WithMany().HasForeignKey(k => k.JobId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasQueryFilter(k => !hasUser || k.OwnerUserId == userId);
+        });
+        modelBuilder.Entity<ReviewCopyJob>(entity =>
+        {
+            entity.HasKey(j => j.Id);
+            entity.HasIndex(j => new { j.OwnerUserId, j.RequestId }).IsUnique();
+            entity.HasIndex(j => j.PlanId).IsUnique();
+            entity.HasIndex(j => new { j.State, j.CreatedAtUtc });
+            entity.HasQueryFilter(j => !hasUser || j.OwnerUserId == userId);
+            entity.HasMany(j => j.Tracks).WithOne().HasForeignKey(t => t.JobId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ReviewPlan>().WithMany().HasForeignKey(j => j.PlanId).OnDelete(DeleteBehavior.Restrict);
+        });
+        modelBuilder.Entity<ReviewCopyTrack>(entity =>
+        {
+            entity.HasKey(t => new { t.JobId, t.SongId });
+            entity.HasIndex(t => new { t.SongId, t.State });
+        });
+        modelBuilder.Entity<ReviewAudioCacheEntry>().HasKey(p => new { p.Version, p.ContentSha256 });
         modelBuilder.Entity<SongMetadata>().Property(s => s.ReviewPlanId).IsConcurrencyToken();
         modelBuilder.Entity<ReviewPlan>(entity =>
         {

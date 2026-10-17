@@ -8,6 +8,7 @@ using MusicHoarder.Api.Library;
 using MusicHoarder.Api.Contracts;
 using MusicHoarder.Api.Persistence;
 using MusicHoarder.Api.Review;
+using MusicHoarder.Api.Review.Copy;
 
 namespace MusicHoarder.Api.Endpoints;
 
@@ -33,10 +34,32 @@ public static class AlbumReviewEndpoints
             .WithName("GetReviewPlan").WithTags("Album review").Produces<ReviewPlanPreview>().Produces(404);
         app.MapPost("/api/review/plans/{id:guid}/apply", ApplyPlan).RequireAdmin()
             .WithName("ApplyReviewPlan").WithTags("Album review")
-            .WithSummary("Apply only the immutable preview's metadata. Copies await verified build stage.")
+            .WithSummary("Apply exact metadata and atomically queue a targeted verified copy job.")
             .Produces<ReviewPlanResult>().Produces<ReviewPlanError>(409).Produces(404).Produces(401).Produces(403);
+        app.MapGet("/api/review/jobs/{id:guid}", GetJob).RequireAdmin()
+            .WithName("GetVerifiedReviewJob").WithTags("Album review").Produces<ReviewCopyJobResult>();
+        app.MapPost("/api/review/jobs/{id:guid}/retry", RetryJob).RequireAdmin()
+            .WithName("RetryVerifiedReviewJob").WithTags("Album review").Produces<ReviewCopyJobResult>();
+        app.MapPost("/api/review/jobs/{id:guid}/rollback", RollbackJob).RequireAdmin()
+            .WithName("RollbackVerifiedReviewJob").WithTags("Album review").Produces<ReviewCopyJobResult>();
         return app;
     }
+
+    internal static Task<IResult> GetJob(Guid id, MusicHoarderDbContext db, ICurrentUserAccessor user,
+        IFileSystem files, [FromServices] IReviewAudioCommandRunner runner, CancellationToken ct)
+        => PlanResult(user, () => ReviewCopyJobs.GetAsync(db, files, user.UserId, id, ct, runner));
+    internal static Task<IResult> RetryJob(Guid id, MusicHoarderDbContext db, ICurrentUserAccessor user,
+        IFileSystem files, CancellationToken ct) => PlanResult(user, async () =>
+    {
+        await ReviewCopyJobs.RetryAsync(db, user.UserId, id, ct);
+        return await ReviewCopyJobs.GetAsync(db, files, user.UserId, id, ct);
+    });
+    internal static Task<IResult> RollbackJob(Guid id, MusicHoarderDbContext db, ICurrentUserAccessor user,
+        IFileSystem files, CancellationToken ct) => PlanResult(user, async () =>
+    {
+        await ReviewCopyRollback.RunAsync(db, files, user.UserId, id, ct);
+        return await ReviewCopyJobs.GetAsync(db, files, user.UserId, id, ct);
+    });
 
     internal static Task<IResult> PreviewPlan(ReviewPlanRequest request, MusicHoarderDbContext db,
         ICurrentUserAccessor user, IFileSystem files, [FromServices] IDestinationPathResolver resolver, CancellationToken ct)
@@ -47,7 +70,7 @@ public static class AlbumReviewEndpoints
 
     internal static Task<IResult> ApplyPlan(Guid id, ReviewPlanApplyRequest request, MusicHoarderDbContext db,
         ICurrentUserAccessor user, IFileSystem files, [FromServices] IDestinationPathResolver resolver, CancellationToken ct)
-        => PlanResult(user, () => ReviewPlanService.ApplyAsync(db, files, resolver, user.UserId, id, request.Revision, ct));
+        => PlanResult(user, () => ReviewPlanService.ApplyAsync(db, files, resolver, user.UserId, id, request.Revision, ct, request.RequestId));
 
     private static async Task<IResult> PlanResult<T>(ICurrentUserAccessor user, Func<Task<T>> action)
     {

@@ -30,6 +30,11 @@ internal static class ReviewFields
     internal static Dictionary<string, object?> Values(SongMetadata song) => Names.ToDictionary(n => n,
         n => ManualReviewMetadata.IsExplicitUnknown(song, n) ? null : Get(song, n), StringComparer.Ordinal);
 
+    // A rollback restores a trusted persisted baseline, including legacy values that would not
+    // pass today's input validation. It must not reinterpret or normalize that historical state.
+    internal static void Restore(SongMetadata song, string name, JsonElement value) => Set(song, name,
+        value.ValueKind == JsonValueKind.Null ? null : value.Deserialize(Properties[name].PropertyType));
+
     internal static object? Parse(string name, JsonElement value)
     {
         if (!Properties.TryGetValue(name, out var p)) throw Invalid($"Unsupported field: {name}.");
