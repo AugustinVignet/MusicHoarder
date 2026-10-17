@@ -7,6 +7,7 @@ using MusicHoarder.Api.Matching;
 using MusicHoarder.Api.Options;
 using MusicHoarder.Api.Persistence;
 using MusicHoarder.Api.Settings;
+using MusicHoarder.Api.Review.Copy;
 
 namespace MusicHoarder.Api.Enrichment;
 
@@ -72,17 +73,25 @@ public class EnrichmentOrchestrator : IEnrichmentOrchestrator
         InitializeSemaphores(options.Value);
     }
 
-    public async Task<EnrichmentOutcome> ProcessSongAsync(int songId, CancellationToken ct = default)
+    public Task<EnrichmentOutcome> ProcessSongAsync(int songId, CancellationToken ct = default)
+        => ProcessSongCoreAsync(songId, false, true, ct);
+
+    internal Task<EnrichmentOutcome> ProcessTargetedSongAsync(int songId, bool fingerprintQualified, CancellationToken ct)
+        => ProcessSongCoreAsync(songId, true, fingerprintQualified, ct);
+
+    private async Task<EnrichmentOutcome> ProcessSongCoreAsync(int songId, bool targeted, bool fingerprintQualified, CancellationToken ct)
     {
         using var scope = _scopeFactory.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MusicHoarderDbContext>();
 
+        // The targeted worker owns this same song gate when calling its explicit entry point.
+        await using var gate = targeted ? null : await ReviewWriteGuard.AcquireSongAsync(dbContext, songId, true, ct);
         var song = await dbContext.Songs
             .IgnoreQueryFilters()
             .Include(s => s.ProviderAttempts)
             .FirstOrDefaultAsync(s => s.Id == songId, ct);
 
-        if (song is null || song.IsDeleted)
+        if (song is null || song.IsDeleted || !targeted && song.AutomationHeld)
         {
             _logger.LogDebug("Skipping enrichment for missing/deleted song {SongId}", songId);
             return EnrichmentOutcome.Skipped;
@@ -97,6 +106,11 @@ public class EnrichmentOrchestrator : IEnrichmentOrchestrator
         var effective = await _runtimeSettings.GetAsync(ct).ConfigureAwait(false);
         var enabledProviders = GetEnabledProviders(effective);
         var enabledEnums = BuildEnabledEnums(effective);
+        if (targeted && !fingerprintQualified)
+        {
+            enabledProviders = enabledProviders.Where(p => p.Name != "AcoustID").ToList();
+            enabledEnums = enabledEnums.Where(p => p != EnrichmentProvider.AcoustID).ToHashSet();
+        }
 
         if (enabledProviders.Count == 0)
         {
@@ -220,7 +234,7 @@ public class EnrichmentOrchestrator : IEnrichmentOrchestrator
         var matched = ApplyConsensus(song, consensus, dbContext);
         await dbContext.SaveChangesAsync(ct);
 
-        if (matched)
+        if (matched && !targeted)
             await FetchLyricsForSongAsync(song, dbContext, ct);
 
         return ToOutcome(song.EnrichmentStatus);

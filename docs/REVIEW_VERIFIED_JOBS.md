@@ -59,6 +59,25 @@ The memory semaphore fallback exists only for non-PostgreSQL unit tests.
 Production uses PostgreSQL and the real hosted worker. There is no RAM-only
 queue whose loss can discard an acknowledged Apply.
 
+## Timestamp persistence (C-R1)
+
+Snapshots and public receipts represent UTC timestamps at PostgreSQL/Npgsql's
+persisted microsecond precision, including dates captured before SaveChanges.
+Snapshot reads apply the same normalization to legacy JSON with 100 ns fractions;
+existing jobs need no migration or rewritten baseline. Both approval and prior
+build dates keep their null/value meaning. Rollback restores that persisted value.
+
+Comparison still includes the approval timestamp, owner/plan, exact metadata,
+manual values and membership. There is no time tolerance: a change of one
+persisted microsecond is a different approval and refuses publication/rollback.
+Build status/date remain excluded from the later-correction check as before,
+because publication itself updates them. Content/generation checks still apply.
+
+Normal gate disposal explicitly unlocks and awaits PostgreSQL before closing the
+dedicated session, so an immediate Apply replay cannot race socket-close cleanup.
+An interrupted process still releases its locks on session loss. Active writers
+continue to return writer_busy before any mutation.
+
 ## File states and evidence
 
 A job is pending, running, needsAttention, completed, rollingBack or rolledBack.

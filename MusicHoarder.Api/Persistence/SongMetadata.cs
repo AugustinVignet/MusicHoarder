@@ -177,6 +177,8 @@ public class SongMetadata
         lastModifiedUtc < indexedAtUtc ? lastModifiedUtc : indexedAtUtc;
 
     public string? Fingerprint { get; set; }
+    /// <summary>Explicit targeted work owns the allowed steps until automation is explicitly resumed.</summary>
+    public bool AutomationHeld { get; set; }
     public int? Bitrate { get; set; }
 
     /// <summary>
@@ -583,7 +585,7 @@ public class SongMetadata
     public bool IsDeleted => DeletedAtUtc.HasValue;
 
     public bool IsReadyForEnrichment =>
-        !IsDeleted
+        !IsDeleted && !AutomationHeld
         && EnrichmentStatus == EnrichmentStatus.Pending
         && (
             (!string.IsNullOrWhiteSpace(Fingerprint) && DurationSeconds is not null)
@@ -591,7 +593,7 @@ public class SongMetadata
             || !string.IsNullOrWhiteSpace(Isrc));
 
     public bool IsReadyForBuild =>
-        !IsDeleted
+        !IsDeleted && !AutomationHeld
         && !IsDuplicate
         && EnrichmentStatus == EnrichmentStatus.Matched
         && LibraryBuildStatus != LibraryBuildStatus.Done
@@ -813,7 +815,7 @@ public class SongMetadata
 
     public void ApplyEnrichmentMatch(EnrichmentMatchData match)
     {
-        if (ReviewPlanId.HasValue) return;
+        if (ReviewPlanId.HasValue || AutomationHeld) return;
         CaptureOriginalMetadata();
 
         Artist = string.IsNullOrWhiteSpace(match.Artist) ? Artist : match.Artist;
@@ -983,13 +985,14 @@ public class SongMetadata
 
     public void MarkAsDuplicate(int duplicateOfId)
     {
-        if (ReviewPlanId.HasValue) return;
+        if (ReviewPlanId.HasValue || AutomationHeld) return;
         IsDuplicate = true;
         DuplicateOfId = duplicateOfId;
     }
 
     public void ClearDuplicate()
     {
+        if (AutomationHeld) return;
         IsDuplicate = false;
         DuplicateOfId = null;
     }
@@ -1131,7 +1134,7 @@ public class SongMetadata
     // --- Lyrics lifecycle ---
 
     public bool IsReadyForLyricsFetch =>
-        !IsDeleted
+        !IsDeleted && !AutomationHeld
         && (EnrichmentStatus == EnrichmentStatus.Matched || EnrichmentStatus == EnrichmentStatus.NeedsReview)
         && LyricsStatus == LyricsStatus.NotFetched
         && !string.IsNullOrWhiteSpace(Title)
@@ -1188,7 +1191,7 @@ public class SongMetadata
     /// rather than after a cooldown) are deliberately excluded.
     /// </summary>
     public bool IsLyricsRecheckCandidate =>
-        !IsDeleted
+        !IsDeleted && !AutomationHeld
         && (EnrichmentStatus == EnrichmentStatus.Matched || EnrichmentStatus == EnrichmentStatus.NeedsReview)
         && !string.IsNullOrWhiteSpace(Title)
         && !string.IsNullOrWhiteSpace(Artist)

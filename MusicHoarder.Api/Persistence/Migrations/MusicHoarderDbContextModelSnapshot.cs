@@ -1103,6 +1103,106 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.ToTable("LibraryWriteEvents");
                 });
 
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.PipelineStageAttempt", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("AttemptedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CandidateJson")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Code")
+                        .HasColumnType("text");
+
+                    b.Property<int?>("ExitCode")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("InputSha256")
+                        .HasColumnType("text");
+
+                    b.Property<Guid?>("JobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("NextRetryAfterUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("OwnerUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("SongId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Stage")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("JobId", "SongId", "Stage")
+                        .IsUnique();
+
+                    b.HasIndex("OwnerUserId", "SongId", "Stage", "AttemptedAtUtc");
+
+                    b.ToTable("PipelineStageAttempts");
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.PipelineStageState", b =>
+                {
+                    b.Property<int>("SongId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Stage")
+                        .HasColumnType("text");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("CandidateJson")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Code")
+                        .HasColumnType("text");
+
+                    b.Property<string>("InputSha256")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("NextRetryAfterUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("OwnerUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("SourceWarningCode")
+                        .HasColumnType("text");
+
+                    b.Property<string>("SourceWarningInputSha256")
+                        .HasColumnType("text");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("Targeted")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("SongId", "Stage");
+
+                    b.HasIndex("OwnerUserId", "Stage", "State", "SongId");
+
+                    b.ToTable("PipelineStageStates");
+                });
+
             modelBuilder.Entity("MusicHoarder.Api.Persistence.PlaybackSession", b =>
                 {
                     b.Property<int>("Id")
@@ -1636,6 +1736,10 @@ namespace MusicHoarder.Api.Persistence.Migrations
 
                     b.Property<string>("Artists")
                         .HasColumnType("text");
+
+                    b.Property<bool>("AutomationHeld")
+                        .IsConcurrencyToken()
+                        .HasColumnType("boolean");
 
                     b.Property<int?>("Bitrate")
                         .HasColumnType("integer");
@@ -2411,6 +2515,78 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.ToTable("SpotifyTrackLibraryMatches");
                 });
 
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.TargetedRetryItem", b =>
+                {
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("SongId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Ordinal")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Code")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("CompletedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("InputSha256")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Stage")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("StartedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("JobId", "SongId", "Ordinal");
+
+                    b.ToTable("TargetedRetryItems");
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.TargetedRetryJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("OwnerUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RequestJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OwnerUserId", "RequestId")
+                        .IsUnique();
+
+                    b.HasIndex("State", "CreatedAtUtc");
+
+                    b.ToTable("TargetedRetryJobs");
+                });
+
             modelBuilder.Entity("MusicHoarder.Api.Persistence.TrackSyncState", b =>
                 {
                     b.Property<int>("Id")
@@ -3111,6 +3287,15 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.Navigation("Song");
                 });
 
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.TargetedRetryItem", b =>
+                {
+                    b.HasOne("MusicHoarder.Api.Persistence.TargetedRetryJob", null)
+                        .WithMany("Items")
+                        .HasForeignKey("JobId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("MusicHoarder.Api.Persistence.TrackSyncState", b =>
                 {
                     b.HasOne("MusicHoarder.Api.Persistence.SongMetadata", "Song")
@@ -3219,6 +3404,11 @@ namespace MusicHoarder.Api.Persistence.Migrations
                     b.Navigation("MusicVideo");
 
                     b.Navigation("ProviderAttempts");
+                });
+
+            modelBuilder.Entity("MusicHoarder.Api.Persistence.TargetedRetryJob", b =>
+                {
+                    b.Navigation("Items");
                 });
 #pragma warning restore 612, 618
         }

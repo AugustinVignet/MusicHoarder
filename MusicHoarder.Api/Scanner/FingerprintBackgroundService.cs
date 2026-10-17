@@ -5,6 +5,9 @@ using MusicHoarder.Api.Jobs;
 using MusicHoarder.Api.Options;
 using MusicHoarder.Api.Persistence;
 using MusicHoarder.Api.Pipeline;
+using MusicHoarder.Api.Review.Copy;
+using MusicHoarder.Api.Review.Retry;
+using System.IO.Abstractions;
 
 namespace MusicHoarder.Api.Scanner;
 
@@ -19,10 +22,6 @@ public class FingerprintBackgroundService(
     IOptions<MusicEnricherOptions> options,
     ILogger<FingerprintBackgroundService> logger) : BackgroundService
 {
-    // Songs where fpcalc permanently failed in this service lifetime.
-    // Cleared on service restart so failed files get retried after a redeploy.
-    private readonly HashSet<int> _permanentlyFailed = [];
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var opts = options.Value;
@@ -161,11 +160,11 @@ public class FingerprintBackgroundService(
             var query = db.Songs
                 .IgnoreQueryFilters()
                 .AsNoTracking()
-                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic)
+                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && !s.AutomationHeld)
                 .Where(s => s.Fingerprint == null || s.Fingerprint == string.Empty);
 
-            if (_permanentlyFailed.Count > 0)
-                query = query.Where(s => !_permanentlyFailed.Contains(s.Id));
+            query = query.Where(s => !db.PipelineStageStates.IgnoreQueryFilters().Any(p => p.SongId == s.Id && p.Stage == "fingerprint"
+                && (p.Targeted || p.State == "failed" || p.State == "qualificationRequired")));
 
             // Explicitly-acquired tracks (the download staging root) jump the queue: a fresh import
             // must not fingerprint behind a whole-library backlog. Ordering by Id alone put new
@@ -202,43 +201,27 @@ public class FingerprintBackgroundService(
             },
             async (item, token) =>
             {
-                var outcome = item.AudioPath is null
-                    ? FpcalcOutcome.Failure("released source has no destination copy to fingerprint")
-                    : await fpcalcService.GetFingerprintAsync(item.AudioPath, ct: token);
+                using var trackScope = scopeFactory.CreateScope();
+                var trackDb = trackScope.ServiceProvider.GetRequiredService<MusicHoarderDbContext>();
+                await using var gate = await ReviewWriteGuard.AcquireSongAsync(trackDb, item.Id, true, token);
+                var song = await trackDb.Songs.IgnoreQueryFilters().SingleOrDefaultAsync(s => s.Id == item.Id, token);
+                if (song is null || song.IsDeleted || song.AutomationHeld || !string.IsNullOrEmpty(song.Fingerprint)) return;
+                var files = trackScope.ServiceProvider.GetRequiredService<IFileSystem>();
+                var tools = trackScope.ServiceProvider.GetRequiredService<IReviewAudioCommandRunner>();
+                var audioPath = song.IsSourceReleased ? song.DestinationPath ?? song.PreviousDestinationPath : song.SourcePath;
+                var observed = await FingerprintStage.ExecuteAsync(trackDb, song, audioPath, files, fpcalcService, tools, null, token);
+                var outcome = observed.Accepted is { } accepted ? FpcalcOutcome.Success(accepted) : FpcalcOutcome.Failure(observed.Code ?? "fingerprint_failed");
                 lock (resultsLock)
                 {
                     results.Add((item.Id, outcome));
                 }
             });
 
-        using var scope2 = scopeFactory.CreateScope();
-        var db2 = scope2.ServiceProvider.GetRequiredService<MusicHoarderDbContext>();
-        var ids = results.Select(r => r.Id).ToList();
-        var songs = await db2.Songs
-            .IgnoreQueryFilters()
-            .Where(s => ids.Contains(s.Id))
-            .ToDictionaryAsync(s => s.Id, ct);
-
         foreach (var (id, outcome) in results)
         {
-            if (!songs.TryGetValue(id, out var song)) continue;
-
-            if (outcome.Result is { } result)
-            {
-                song.Fingerprint = result.Fingerprint;
-                song.DurationSeconds = result.DurationSeconds;
-                progressTracker.IncrementFingerprinted();
-            }
-            else
-            {
-                _permanentlyFailed.Add(id);
-                progressTracker.IncrementFailed();
-                logger.LogWarning("fpcalc failed for song {Id} ({Path}): {Reason}",
-                    id, song.SourcePath, outcome.FailureReason);
-            }
+            if (outcome.Result is not null) progressTracker.IncrementFingerprinted();
+            else { progressTracker.IncrementFailed(); logger.LogWarning("Fingerprint failed for song {Id}: {Code}", id, outcome.FailureReason); }
         }
-
-        await db2.SaveChangesAsync(ct);
 
         // Download-staged songs take the enrichment fast lane too — same reasoning as the batch
         // ordering above: an explicit acquisition should not enrich behind a backfill sweep.
@@ -304,11 +287,11 @@ public class FingerprintBackgroundService(
         var query = db.Songs
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic)
+            .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && !s.AutomationHeld)
             .Where(s => s.Fingerprint == null || s.Fingerprint == string.Empty);
 
-        if (_permanentlyFailed.Count > 0)
-            query = query.Where(s => !_permanentlyFailed.Contains(s.Id));
+        query = query.Where(s => !db.PipelineStageStates.IgnoreQueryFilters().Any(p => p.SongId == s.Id && p.Stage == "fingerprint"
+            && (p.Targeted || p.State == "failed" || p.State == "qualificationRequired")));
 
         return await query.CountAsync(ct);
     }

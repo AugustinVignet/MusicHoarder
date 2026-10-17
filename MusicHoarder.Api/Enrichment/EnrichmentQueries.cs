@@ -22,7 +22,7 @@ internal static class EnrichmentQueries
     public static IQueryable<SongMetadata> WhereReadyForEnrichment(this IQueryable<SongMetadata> query)
     {
         return query
-            .Where(s => s.DeletedAtUtc == null)
+            .Where(s => s.DeletedAtUtc == null && !s.AutomationHeld)
             .Where(s => s.EnrichmentStatus == EnrichmentStatus.Pending)
             .Where(IsEnrichable);
     }
@@ -41,7 +41,7 @@ internal static class EnrichmentQueries
     {
         var enabledCount = enabled.Count;
         return query
-            .Where(s => s.DeletedAtUtc == null)
+            .Where(s => s.DeletedAtUtc == null && !s.AutomationHeld)
             .Where(s => !s.IsSynthetic)
             // Demo rows are seeded terminal-Matched with zero attempts, so without this they'd be
             // "missing every provider" and get re-enriched (overwriting the curated demo data).
@@ -61,7 +61,7 @@ internal static class EnrichmentQueries
     public static IQueryable<SongMetadata> WhereReadyForLyricsFetch(this IQueryable<SongMetadata> query)
     {
         return query
-            .Where(s => s.DeletedAtUtc == null)
+            .Where(s => s.DeletedAtUtc == null && !s.AutomationHeld)
             .Where(s => !s.IsSynthetic)
             .ExcludingDemoTenant()
             .Where(s => s.EnrichmentStatus == EnrichmentStatus.Matched
@@ -89,7 +89,7 @@ internal static class EnrichmentQueries
     {
         return query
             .Where(s => s.LyricsNextRecheckAfterUtc == null || s.LyricsNextRecheckAfterUtc <= now)
-            .Where(s => s.DeletedAtUtc == null)
+            .Where(s => s.DeletedAtUtc == null && !s.AutomationHeld)
             .Where(s => !s.IsSynthetic)
             .ExcludingDemoTenant()
             .Where(s => s.EnrichmentStatus == EnrichmentStatus.Matched
@@ -111,7 +111,7 @@ internal static class EnrichmentQueries
     public static IQueryable<int> WhereRetryableProviderAttempts(this IQueryable<SongProviderAttempt> query, DateTime now)
     {
         return query
-            .Where(a => !a.Song.IsManuallyApproved)
+            .Where(a => !a.Song.IsManuallyApproved && !a.Song.AutomationHeld)
             .Where(a =>
                 (a.Status == ProviderAttemptStatus.RateLimited && (a.RetryAfterUtc == null || a.RetryAfterUtc <= now))
                 || ((a.Status == ProviderAttemptStatus.NoMatch || a.Status == ProviderAttemptStatus.Failed)

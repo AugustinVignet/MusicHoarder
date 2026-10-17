@@ -35,6 +35,10 @@ public class MusicHoarderDbContext : DbContext
     }
 
     public DbSet<SongMetadata> Songs { get; set; } = null!;
+    public DbSet<TargetedRetryJob> TargetedRetryJobs { get; set; } = null!;
+    public DbSet<TargetedRetryItem> TargetedRetryItems { get; set; } = null!;
+    public DbSet<PipelineStageState> PipelineStageStates { get; set; } = null!;
+    public DbSet<PipelineStageAttempt> PipelineStageAttempts { get; set; } = null!;
     public DbSet<ReviewCopyRequestKey> ReviewCopyRequestKeys { get; set; } = null!;
     public DbSet<ReviewCopyJob> ReviewCopyJobs { get; set; } = null!;
     public DbSet<ReviewCopyTrack> ReviewCopyTracks { get; set; } = null!;
@@ -97,6 +101,29 @@ public class MusicHoarderDbContext : DbContext
         var hasUser = _currentUser is not null;
         var userId = _currentUser?.UserId ?? Guid.Empty;
 
+        modelBuilder.Entity<TargetedRetryJob>(entity =>
+        {
+            entity.HasKey(j => j.Id);
+            entity.HasIndex(j => new { j.OwnerUserId, j.RequestId }).IsUnique();
+            entity.HasIndex(j => new { j.State, j.CreatedAtUtc });
+            entity.HasMany(j => j.Items).WithOne().HasForeignKey(i => i.JobId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasQueryFilter(j => !hasUser || j.OwnerUserId == userId);
+        });
+        modelBuilder.Entity<TargetedRetryItem>().HasKey(i => new { i.JobId, i.SongId, i.Ordinal });
+        modelBuilder.Entity<PipelineStageState>(entity =>
+        {
+            entity.HasKey(s => new { s.SongId, s.Stage });
+            entity.HasIndex(s => new { s.OwnerUserId, s.Stage, s.State, s.SongId });
+            entity.HasQueryFilter(s => !hasUser || s.OwnerUserId == userId);
+        });
+        modelBuilder.Entity<PipelineStageAttempt>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+            entity.HasIndex(a => new { a.OwnerUserId, a.SongId, a.Stage, a.AttemptedAtUtc });
+            entity.HasIndex(a => new { a.JobId, a.SongId, a.Stage }).IsUnique();
+            entity.HasQueryFilter(a => !hasUser || a.OwnerUserId == userId);
+        });
+        modelBuilder.Entity<SongMetadata>().Property(s => s.AutomationHeld).IsConcurrencyToken();
         modelBuilder.Entity<ReviewCopyRequestKey>(entity =>
         {
             entity.HasKey(k => new { k.OwnerUserId, k.RequestId });

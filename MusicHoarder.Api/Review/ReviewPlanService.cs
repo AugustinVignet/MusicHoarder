@@ -142,7 +142,7 @@ internal static class ReviewPlanService
                 }
                 // Even an approve-only plan has a durable receipt (ReviewPlans). No invented field audit.
                 song.ManualReviewValues = approved;
-                if (patch.PreserveAlbumMembership) song.ClearDuplicate();
+                if (patch.PreserveAlbumMembership) { song.IsDuplicate = false; song.DuplicateOfId = null; }
                 song.ReviewPlanId = id;
                 song.EnrichmentStatus = EnrichmentStatus.Matched;
                 song.EnrichmentError = null;

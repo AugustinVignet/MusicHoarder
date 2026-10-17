@@ -1,98 +1,85 @@
-using System.Diagnostics;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
+using MusicHoarder.Api.Audio;
 using MusicHoarder.Api.Options;
+using MusicHoarder.Api.Review.Copy;
 
 namespace MusicHoarder.Api.Scanner;
 
 public record FpcalcResult(int DurationSeconds, string Fingerprint);
-
-/// <summary>
-/// Result of an fpcalc invocation: a successful <see cref="FpcalcResult"/>, or a
-/// <see cref="FailureReason"/> describing why fingerprinting failed for this file
-/// (so the caller can surface it instead of a bare null).
-/// </summary>
 public readonly record struct FpcalcOutcome(FpcalcResult? Result, string? FailureReason)
 {
-    public static FpcalcOutcome Success(FpcalcResult result) => new(result, null);
-    public static FpcalcOutcome Failure(string reason) => new(null, reason);
+    public string State { get; init; } = Result is null ? "failed" : "success";
+    public string? Code { get; init; }
+    public int? ExitCode { get; init; }
+    public FpcalcResult? Candidate { get; init; } = Result;
+    public static FpcalcOutcome Success(FpcalcResult result) => new(result, null) { ExitCode = 0 };
+    public static FpcalcOutcome Failure(string reason) => new(null, reason) { Code = "fingerprint_failed" };
 }
-
 public interface IFpcalcService
 {
-    /// <summary>
-    /// Fingerprints a media file. <paramref name="maxLengthSeconds"/> overrides fpcalc's default
-    /// ~120 s analysis window (<c>-length</c>) — the music-video aligner asks for a longer window so
-    /// a clip's cinematic intro still overlaps the song's stored fingerprint. fpcalc decodes via
-    /// libav, so video containers (mp4) fingerprint their audio track directly.
-    /// </summary>
     Task<FpcalcOutcome> GetFingerprintAsync(string filePath, int? maxLengthSeconds = null, CancellationToken ct = default);
 }
-
-public class FpcalcService(
-    IOptions<MusicEnricherOptions> options,
-    ILogger<FpcalcService> logger) : IFpcalcService
+public sealed record FpcalcCommandResult(int? ExitCode, string Output, string Errors, string? Failure = null, bool Truncated = false);
+public interface IFpcalcCommandRunner
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
+    Task<FpcalcCommandResult> RunAsync(string path, int? lengthSeconds, CancellationToken ct);
+}
+internal sealed class FpcalcCommandRunner(string executable, TimeSpan? timeout = null) : IFpcalcCommandRunner
+{
+    public async Task<FpcalcCommandResult> RunAsync(string path, int? lengthSeconds, CancellationToken ct)
+    {
+        var args = new List<string> { "-json" };
+        if (lengthSeconds is > 0) { args.Add("-length"); args.Add(lengthSeconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)); }
+        args.Add(path);
+        // Reuse the bounded audio-process launcher: no shell, concurrent capped pipes, kill on timeout/cancel.
+        var result = await new ReviewAudioCommandRunner(string.IsNullOrWhiteSpace(executable) ? "fpcalc" : executable, timeout)
+            .ExecuteAsync(false, args, ct);
+        return new(result.ExitCode, result.Output, result.Errors, result.Failure, result.Truncated);
+    }
+}
+public class FpcalcService(IOptions<MusicEnricherOptions> options, ILogger<FpcalcService> logger,
+    IFpcalcCommandRunner? runner = null) : IFpcalcService
+{
+    internal const string ValidationVersion = "fpcalc-validation-v1";
     public async Task<FpcalcOutcome> GetFingerprintAsync(string filePath, int? maxLengthSeconds = null, CancellationToken ct = default)
     {
         try
         {
-            var psi = new ProcessStartInfo(options.Value.FpcalcPath)
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            psi.ArgumentList.Add("-json");
-            if (maxLengthSeconds is > 0)
-            {
-                psi.ArgumentList.Add("-length");
-                psi.ArgumentList.Add(maxLengthSeconds.Value.ToString());
-            }
-            psi.ArgumentList.Add(filePath);
-
-            using var process = new Process { StartInfo = psi };
-            process.Start();
-
-            // Read both streams concurrently to avoid buffer-full deadlock.
-            var outputTask = process.StandardOutput.ReadToEndAsync(ct);
-            var errorTask = process.StandardError.ReadToEndAsync(ct);
-            await Task.WhenAll(outputTask, errorTask, process.WaitForExitAsync(ct));
-
-            if (process.ExitCode != 0)
-            {
-                var stderr = errorTask.Result.Trim();
-                logger.LogDebug("fpcalc exited {Code} for {File}: {Error}",
-                    process.ExitCode, Path.GetFileName(filePath), stderr);
-                return FpcalcOutcome.Failure($"exited {process.ExitCode}: {stderr}");
-            }
-
-            var parsed = JsonSerializer.Deserialize<FpcalcOutput>(outputTask.Result, JsonOptions);
-            if (parsed?.Fingerprint is null)
-            {
-                logger.LogDebug("fpcalc returned empty fingerprint for {File}", Path.GetFileName(filePath));
-                return FpcalcOutcome.Failure("ran but produced no fingerprint (undecodable/too short)");
-            }
-
-            return FpcalcOutcome.Success(new FpcalcResult((int)parsed.Duration, parsed.Fingerprint));
+            var command = await (runner ?? new FpcalcCommandRunner(options.Value.FpcalcPath)).RunAsync(filePath, maxLengthSeconds, ct);
+            return Validate(command);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) { throw; }
+        catch (Exception e)
         {
-            logger.LogDebug("fpcalc error for {File}: {Message}", Path.GetFileName(filePath), ex.Message);
-            return FpcalcOutcome.Failure(ex.Message);
+            logger.LogDebug(e, "Fingerprint command failed");
+            return FpcalcOutcome.Failure("fingerprint_command_failed") with { Code = "fingerprint_command_failed" };
         }
     }
-
-    private sealed class FpcalcOutput
+    internal static FpcalcOutcome Validate(FpcalcCommandResult command)
     {
-        [JsonPropertyName("duration")]
-        public double Duration { get; set; }
-
-        [JsonPropertyName("fingerprint")]
-        public string? Fingerprint { get; set; }
+        FpcalcOutcome Fail(string code) => FpcalcOutcome.Failure(code) with { Code = code, ExitCode = command.ExitCode };
+        if (command.Failure is not null) return Fail(command.Failure);
+        if (command.Truncated || command.Output.Length > 32768 || command.Errors.Length > 32768) return Fail("fpcalc_output_limit");
+        FpcalcResult candidate;
+        try
+        {
+            using var document = JsonDocument.Parse(command.Output);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || root.EnumerateObject().GroupBy(p => p.Name, StringComparer.Ordinal).Any(g => g.Count() > 1)) return Fail("invalid_fpcalc_json");
+            if (!root.TryGetProperty("duration", out var duration) || !duration.TryGetDouble(out var seconds)
+                || !double.IsFinite(seconds) || seconds < 1 || seconds > 604800) return Fail("invalid_fingerprint_duration");
+            if (!root.TryGetProperty("fingerprint", out var fingerprint) || fingerprint.ValueKind != JsonValueKind.String) return Fail("invalid_fingerprint");
+            var text = fingerprint.GetString();
+            if (string.IsNullOrWhiteSpace(text) || text.Length > 32000 || !ChromaprintComparer.TryDecode(text, out var frames) || frames.Length == 0)
+                return Fail("invalid_fingerprint");
+            candidate = new((int)seconds, text);
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException) { return Fail("invalid_fpcalc_json"); }
+        if (command.ExitCode != 0 || !string.IsNullOrWhiteSpace(command.Errors))
+            return new(null, "Audio output requires qualification") { State = "qualificationRequired",
+                Code = command.ExitCode != 0 ? "fpcalc_nonzero_exit" : "fpcalc_audio_diagnostics", ExitCode = command.ExitCode, Candidate = candidate };
+        return FpcalcOutcome.Success(candidate);
     }
 }

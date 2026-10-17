@@ -58,6 +58,34 @@ internal sealed class ReviewCopyProcessor(MusicHoarderDbContext db, IFileSystem 
         return true;
     }
 
+    // D resumes an explicit subset of an already-stopped job. Do not mark it running:
+    // after a crash the durable D intent, not the generic all-track C poller, owns this subset.
+    internal async Task<IReadOnlyDictionary<int, (string State, string? Code)>> RunSelectedAsync(Guid owner, Guid id,
+        IReadOnlySet<int> ids, ReviewWriteGuard guard, CancellationToken ct)
+    {
+        var job = await ReviewCopyJobs.OwnedAsync(db, owner, id, ct);
+        if (job.State is not ("needsAttention" or "completed"))
+            throw TargetedRetryServiceError();
+        var result = new Dictionary<int, (string State, string? Code)>();
+        foreach (var track in job.Tracks.Where(t => ids.Contains(t.SongId)).OrderBy(t => t.SongId))
+        {
+            try { await Process(job, track, guard, ct); result[track.SongId] = ("success", null); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception e) when (e is ReviewCopyFailure or IOException or UnauthorizedAccessException
+                or TagLib.CorruptFileException or TagLib.UnsupportedFormatException or ArgumentException)
+            {
+                track.State = "failed"; track.FailureStage = e is ReviewCopyFailure failure ? failure.Stage : "filesystem";
+                track.FailureCode = e is ReviewCopyFailure known ? known.Code : "copy_io_error";
+                track.UpdatedAtUtc = DateTime.UtcNow; await Save(job, ct);
+                result[track.SongId] = ("failed", track.FailureCode);
+            }
+        }
+        job.State = job.Tracks.All(t => t.State == "published") ? "completed" : "needsAttention";
+        await Save(job, ct);
+        return result;
+        static ReviewPlanException TargetedRetryServiceError() => new(409, new("copy_job_busy", "Targeted retry requires a stopped copy job."));
+    }
+
     private async Task Process(ReviewCopyJob job, ReviewCopyTrack track, ReviewWriteGuard guard, CancellationToken ct)
     {
         var song = await db.Songs.IgnoreQueryFilters().SingleOrDefaultAsync(s => s.Id == track.SongId && s.OwnerUserId == job.OwnerUserId, ct);

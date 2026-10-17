@@ -272,6 +272,9 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<IOptions<MusicEnricherOptions>>().Value.FfmpegPath));
         services.AddScoped<Review.Copy.ReviewCopyProcessor>();
         services.AddHostedService<Review.Copy.ReviewCopyBackgroundService>();
+        services.AddScoped<Review.Retry.ITargetedEnrichmentRunner, Review.Retry.TargetedEnrichmentRunner>();
+        services.AddScoped<Review.Retry.TargetedRetryProcessor>();
+        services.AddHostedService<Review.Retry.TargetedRetryBackgroundService>();
         services.AddScoped<IPipelinePurgeService, PipelinePurgeService>();
 
         // Demo seeder runs first so its data is in place before background workers (which are

@@ -381,7 +381,7 @@ public class IndexService(
                 existing.IndexedAtUtc = metadata.IndexedAtUtc;
                 // A changed source is new evidence, not permission to replace an exact review.
                 // Keep the approval/copies held; stage C must revalidate source content before use.
-                if (existing.ReviewPlanId.HasValue) continue;
+                if (existing.ReviewPlanId.HasValue || existing.AutomationHeld) continue;
                 existing.Artist = metadata.Artist;
                 existing.AlbumArtist = metadata.AlbumArtist;
                 existing.Album = metadata.Album;
