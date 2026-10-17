@@ -301,6 +301,7 @@ public sealed class TargetedRetryTests : IDisposable
     public async Task Migration86_UpDownUp_PreservesCJobsAndSongs()
     {
         await using var store = await Store.CreateAsync(true); Assert.False(store.Db.Database.HasPendingModelChanges());
+        await store.Db.GetService<IMigrator>().MigrateAsync("20261016223611_AddDurableTargetedRetries");
         await AddSongs(store.Db, 1);
         var migrations = (await store.Db.Database.GetAppliedMigrationsAsync()).ToArray(); Assert.Equal(86, migrations.Length);
         Assert.EndsWith("AddDurableTargetedRetries", migrations[^1]);
