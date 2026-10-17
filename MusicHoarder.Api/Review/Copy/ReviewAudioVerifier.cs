@@ -8,11 +8,18 @@ using System.Text.RegularExpressions;
 
 namespace MusicHoarder.Api.Review.Copy;
 
+internal sealed class ReviewAudioMetrics { internal long BytesHashed; internal int DecodeAttempts; }
+
 internal sealed record ReviewAudioStream(string Codec, int SampleRate, int Channels);
 internal sealed record ReviewAudioProof(string Version, string ContentSha256, long SizeBytes,
     string EncodedAudioSha256, string DecodedAudioSha256, IReadOnlyList<ReviewAudioStream> Streams, DateTime VerifiedAtUtc);
 internal sealed record ReviewAudioResult(bool Verified, string? FailedStage, string? FailureCode,
-    ReviewAudioProof? Source, ReviewAudioProof? Candidate, bool SourceCacheHit, bool CandidateCacheHit);
+    ReviewAudioProof? Source, ReviewAudioProof? Candidate, bool SourceCacheHit, bool CandidateCacheHit)
+{
+    // Observations, not proofs. Keep them internal so historical C receipt JSON stays unchanged.
+    internal string? SourceReadSha256 { get; init; }
+    internal string? CandidateReadSha256 { get; init; }
+}
 
 /// <summary>The durable job store supplies this cache. A content hash alone is never a
 /// proof: the matching verifier/tool version and complete successful checks are required.</summary>
@@ -30,7 +37,7 @@ internal interface IReviewAudioCommandRunner
 
 /// <summary>Read-only audio fidelity checks, independent of plan B's persistence/HTTP contract.
 /// No process shell, provider, transcoded output file, musical approval or publication.</summary>
-internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runner, IReviewAudioProofStore? store = null)
+internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runner, IReviewAudioProofStore? store = null, ReviewAudioMetrics? metrics = null)
 {
     internal const string CodeVersion = "review-audio-v1";
     private const string EmptySha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -39,6 +46,7 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
     {
         ReviewAudioProof? left = null;
         var leftHit = false;
+        string? sourceRead = null, candidateRead = null;
         var stage = "tools";
         try
         {
@@ -53,9 +61,9 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
             }
             var key = CodeVersion + ":" + Hash(string.Join('\n', versions));
             stage = "source";
-            (left, leftHit) = await InspectAsync(source, key, ct);
+            (left, leftHit) = await InspectAsync(source, key, ct, hash => sourceRead = hash);
             stage = "candidate";
-            var (right, rightHit) = await InspectAsync(candidate, key, ct);
+            var (right, rightHit) = await InspectAsync(candidate, key, ct, hash => candidateRead = hash);
             var failure = !left.Streams.SequenceEqual(right.Streams) ? "stream_layout_changed"
                 : left.EncodedAudioSha256 != right.EncodedAudioSha256 ? "encoded_audio_changed"
                 : left.DecodedAudioSha256 != right.DecodedAudioSha256 ? "decoded_audio_changed" : null;
@@ -67,18 +75,19 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
                 if (sourceNow.Hash != left.ContentSha256 || candidateNow.Hash != right.ContentSha256)
                     throw new AudioCheckException("file_changed_after_verification");
             }
-            return new(failure is null, failure is null ? null : "comparison", failure, left, right, leftHit, rightHit);
+            return new(failure is null, failure is null ? null : "comparison", failure, left, right, leftHit, rightHit) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead };
         }
-        catch (AudioCheckException e) { return new(false, stage, e.Code, left, null, leftHit, false); }
-        catch (FileNotFoundException) { return new(false, stage, "file_missing", left, null, leftHit, false); }
-        catch (DirectoryNotFoundException) { return new(false, stage, "file_missing", left, null, leftHit, false); }
-        catch (UnauthorizedAccessException) { return new(false, stage, "file_unreadable", left, null, leftHit, false); }
-        catch (IOException) { return new(false, stage, "file_io_error", left, null, leftHit, false); }
+        catch (AudioCheckException e) { return new(false, stage, e.Code, left, null, leftHit, false) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead }; }
+        catch (FileNotFoundException) { return new(false, stage, "file_missing", left, null, leftHit, false) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead }; }
+        catch (DirectoryNotFoundException) { return new(false, stage, "file_missing", left, null, leftHit, false) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead }; }
+        catch (UnauthorizedAccessException) { return new(false, stage, "file_unreadable", left, null, leftHit, false) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead }; }
+        catch (IOException) { return new(false, stage, "file_io_error", left, null, leftHit, false) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead }; }
     }
 
-    private async Task<(ReviewAudioProof Proof, bool CacheHit)> InspectAsync(string path, string version, CancellationToken ct)
+    private async Task<(ReviewAudioProof Proof, bool CacheHit)> InspectAsync(string path, string version, CancellationToken ct, Action<string>? observed = null)
     {
         var before = await SnapshotAsync(path, ct);
+        observed?.Invoke(before.Hash);
         if (store is not null)
         {
             var cached = await store.FindAsync(version, before.Hash, ct);
@@ -97,6 +106,7 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         var encodedHash = ReadHashes(encoded.Output, streams.Count);
         // Decode the ENTIRE file, with no resampling/channel folding or normalization.
         // This catches invalid/truncated frames even when the demuxed payload can be hashed.
+        if (metrics is not null) metrics.DecodeAttempts++;
         var decoded = await runner.RunAsync(false, [.. common, "-c:a", "pcm_s32le", "-f", "streamhash", "-hash", "sha256", "-"], ct);
         CheckCommand(decoded);
         var decodedHash = ReadHashes(decoded.Output, streams.Count);
@@ -107,14 +117,22 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         return (proof, false);
     }
 
-    private static async Task<(string Hash, long Size, DateTime Modified)> SnapshotAsync(string path, CancellationToken ct)
+    internal async Task<(string Hash, long Size, DateTime Modified)> SnapshotAsync(string path, CancellationToken ct)
     {
         var info = new FileInfo(path);
         var length = info.Length; var modified = info.LastWriteTimeUtc;
         if (length == 0) throw new AudioCheckException("empty_file");
         await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
             1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        var hash = Convert.ToHexStringLower(await SHA256.HashDataAsync(input, ct));
+        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[1024 * 1024];
+        int read;
+        while ((read = await input.ReadAsync(buffer.AsMemory(), ct)) > 0)
+        {
+            digest.AppendData(buffer.AsSpan(0, read));
+            if (metrics is not null) metrics.BytesHashed += read;
+        }
+        var hash = Convert.ToHexStringLower(digest.GetHashAndReset());
         info.Refresh();
         if (length != info.Length || modified != info.LastWriteTimeUtc) throw new AudioCheckException("file_changed_during_verification");
         return (hash, length, modified);
@@ -159,7 +177,7 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
     }
     [GeneratedRegex(@"^(\d+),a,SHA256=([a-fA-F0-9]{64})$")]
     private static partial Regex StreamHash();
-    private sealed class AudioCheckException(string code) : Exception(code) { internal string Code { get; } = code; }
+    internal sealed class AudioCheckException(string code) : Exception(code) { internal string Code { get; } = code; }
 }
 
 /// <summary>Bounded process I/O; always drains both pipes, cancels/kills the whole process tree.

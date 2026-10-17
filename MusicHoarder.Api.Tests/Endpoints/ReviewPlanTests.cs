@@ -388,7 +388,8 @@ public sealed class ReviewPlanTests
         var plan = await Preview(db, [Patch(1, new { Title = "Reviewed" })]); await Apply(db, plan);
         var applied = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
         Assert.Contains(applied, m => m.EndsWith("AddExactReviewPlans"));
-        Assert.EndsWith("AddDurableTargetedRetries", applied[^1]);
+        Assert.Contains(applied, m => m.EndsWith("AddDurableTargetedRetries"));
+        Assert.EndsWith("AddDurableCopyAudits", applied[^1]);
         await db.GetService<IMigrator>().MigrateAsync(applied[Array.FindIndex(applied, m => m.EndsWith("AddExactReviewPlans")) - 1]);
         Assert.Equal(1, await db.Database.SqlQueryRaw<int>("SELECT count(*)::int AS \"Value\" FROM \"Songs\"").SingleAsync());
         await db.GetService<IMigrator>().MigrateAsync();

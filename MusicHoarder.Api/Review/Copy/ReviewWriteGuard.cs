@@ -12,6 +12,7 @@ internal sealed class ReviewWriteGuard : IAsyncDisposable
 {
     private const long Key = 0x4d48525657524954;
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, SemaphoreSlim> Local = new();
+    private readonly SemaphoreSlim sessionAccess = new(1, 1);
     private readonly long[] keys;
     private readonly NpgsqlConnection? connection;
     private ReviewWriteGuard(NpgsqlConnection? connection, params long[] keys) { this.connection = connection; this.keys = keys; }
@@ -22,7 +23,7 @@ internal sealed class ReviewWriteGuard : IAsyncDisposable
     internal static Task<ReviewWriteGuard?> AcquireSongAsync(MusicHoarderDbContext db, int songId, bool wait, CancellationToken ct)
         => AcquireKeyAsync(db, 0x4d48534f00000000L | (uint)songId, wait, ct);
 
-    private static async Task<ReviewWriteGuard?> AcquireKeyAsync(MusicHoarderDbContext db, long key, bool wait, CancellationToken ct)
+    internal static async Task<ReviewWriteGuard?> AcquireKeyAsync(MusicHoarderDbContext db, long key, bool wait, CancellationToken ct)
     {
         if (!db.Database.IsNpgsql())
         {
@@ -79,12 +80,27 @@ internal sealed class ReviewWriteGuard : IAsyncDisposable
         catch { await connection.DisposeAsync(); throw; }
     }
 
+    internal async Task<T> InSessionAsync<T>(Func<NpgsqlConnection, Task<T>> action, CancellationToken ct)
+    {
+        if (connection is null) throw new NotSupportedException("Durable audit receipts require PostgreSQL.");
+        await sessionAccess.WaitAsync(ct);
+        try
+        {
+            if (connection.State != System.Data.ConnectionState.Open) throw new IOException("Publication lock session was lost.");
+            // Never reopen: a receipt must commit on the session that still owns the gate.
+            return await action(connection);
+        }
+        finally { sessionAccess.Release(); }
+    }
     internal async Task CheckAsync(CancellationToken ct)
     {
         if (connection is null) return;
-        await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT 1";
-        await command.ExecuteScalarAsync(ct); // fail closed if the owning session was lost
+        await InSessionAsync(async session =>
+        {
+            await using var command = session.CreateCommand();
+            command.CommandText = "SELECT 1";
+            return await command.ExecuteScalarAsync(ct);
+        }, ct);
     }
     public async ValueTask DisposeAsync()
     {
