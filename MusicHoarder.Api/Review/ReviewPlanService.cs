@@ -24,6 +24,11 @@ internal static class ReviewPlanService
     internal const string CopyState = "awaitingVerifiedBuild";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
+    private static Task<AlbumReviewContext> ReadContextAsync(MusicHoarderDbContext db, IFileSystem files,
+        Guid owner, AlbumReviewContextRequest scope, CancellationToken ct) => scope.Audit is null
+        ? AlbumReviewContextReader.ReadAsync(db, files, owner, scope, ct)
+        : AlbumAuditReader.ReadPlanAsync(db, files, owner, scope, ct);
+
     internal static Task<ReviewPlanPreview> PreviewAsync(MusicHoarderDbContext db, IFileSystem files,
         IDestinationPathResolver resolver, Guid owner, ReviewPlanRequest request, CancellationToken ct)
     {
@@ -36,7 +41,10 @@ internal static class ReviewPlanService
             // A retry after an uncertain commit returns the original immutable preview.
             var saved = await db.ReviewPlans.SingleOrDefaultAsync(p => p.Id == id && p.OwnerUserId == owner, token);
             if (saved is not null) return ReadPreview(saved);
-            var context = await AlbumReviewContextReader.ReadAsync(db, files, owner, request.Scope, token);
+            AlbumReviewContext context;
+            try { context = await ReadContextAsync(db, files, owner, request.Scope, token); }
+            catch (AlbumReviewReadException e) when (request.Scope.Audit is not null && e.Error.Code == "reference_changed")
+            { throw Error(409, "context_changed", "The reviewed cached reference changed. Read and select it again."); }
             if (context.Revision != request.ContextRevision)
                 throw Error(409, "context_changed", "Read the album context again before preparing this plan.",
                     [new("contextRevision", null, null, request.ContextRevision, context.Revision)]);
@@ -100,8 +108,8 @@ internal static class ReviewPlanService
             }
             var before = JsonSerializer.Deserialize<AlbumReviewContext>(plan.ContextJson, Json)!;
             AlbumReviewContext current;
-            try { current = await AlbumReviewContextReader.ReadAsync(db, files, owner, request.Scope, token); }
-            catch (AlbumReviewReadException e) when (e.StatusCode is 404 or 413)
+            try { current = await ReadContextAsync(db, files, owner, request.Scope, token); }
+            catch (AlbumReviewReadException e) when (e.StatusCode is 404 or 413 || request.Scope.Audit is not null && e.StatusCode == 409)
             {
                 throw Error(409, "plan_stale", "The reviewed selection is no longer available within its original bounds.",
                     [new("selection", null, null, before.Scope, e.Error)]);
