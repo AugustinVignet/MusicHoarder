@@ -41,19 +41,13 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
     internal const string NeedsReviewGrouping = "Needs Review";
     internal const string NeedsReviewComment = "MusicHoarder: enrichment uncertain — needs review.";
 
-    static TagLibLibraryTagWriter()
-    {
-        // ID3v2.4 is required for real multi-value frames (v2.3 concatenates and loses them).
-        TagLib.Id3v2.Tag.DefaultVersion = 4;
-        TagLib.Id3v2.Tag.ForceDefaultVersion = true;
-    }
-
     public Task WriteTagsAsync(string path, SongMetadata song, AlbumIdentity albumIdentity, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
 
         albumIdentity = albumIdentity.WithManualReview(song);
         using var tagFile = OpenForTagging(path);
+        PrepareNativeTags(tagFile);
         var tag = tagFile.Tag;
 
         // Album-IDENTITY fields come from the reconciled identity (shared by every track of the album)
@@ -138,6 +132,34 @@ public class TagLibLibraryTagWriter : ILibraryTagWriter
 
         tagFile.Save();
         return Task.CompletedTask;
+    }
+
+    private static void PrepareNativeTags(TagLib.File file)
+    {
+        var mpegAudio = file is TagLib.Mpeg.AudioFile;
+        // TagLib creates both ID3 tags on open. A new trailing ID3v1 tag can become part of
+        // ffmpeg's last encoded packet when the source ends with an incomplete MPEG frame.
+        // Keep existing v1 tags, but do not append one that was absent from the physical file.
+        if (mpegAudio && (file.TagTypesOnDisk & TagLib.TagTypes.Id3v1) == 0)
+            file.RemoveTags(TagLib.TagTypes.Id3v1);
+
+        if (file.GetTag(TagLib.TagTypes.Id3v2, mpegAudio) is not TagLib.Id3v2.Tag id3) return;
+
+        // TagLib 2.3 leaves unmapped v2.2 frame IDs at three bytes, then emits those IDs
+        // verbatim in v2.4, corrupting the following frames. Preserve each complete logical
+        // v2.2 frame in a valid private frame instead of inventing a v2.4 meaning or losing it.
+        var owners = id3.GetFrames<TagLib.Id3v2.PrivateFrame>().Select(f => f.Owner).ToHashSet(StringComparer.Ordinal);
+        foreach (var frame in id3.GetFrames().Where(f => f.FrameId.Count == 3).ToArray())
+        {
+            var prefix = "https://github.com/Jeffreyyvdb/MusicHoarder#id3v2.2/" + frame.FrameId.ToString(TagLib.StringType.Latin1) + "/";
+            var suffix = 0;
+            while (!owners.Add(prefix + suffix)) suffix++;
+            id3.ReplaceFrame(frame, new TagLib.Id3v2.PrivateFrame(prefix + suffix, frame.Render(2)));
+        }
+
+        // Select the version on this tag; changing TagLib's static defaults affects other writers.
+        // v2.4 is required for real multi-value frames (v2.3 concatenates and loses them).
+        id3.Version = 4;
     }
 
     /// <summary>
