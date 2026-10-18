@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using MusicHoarder.Api.Library;
 using MusicHoarder.Api.Review.Copy;
 using MusicHoarder.Api.Tests.Library;
@@ -32,6 +34,32 @@ public sealed class ReviewAudioVerifierTests : IDisposable
         Assert.NotEqual(result.Source.ContentSha256, result.Candidate.ContentSha256);
         await using var input = File.OpenRead(source);
         Assert.Equal(sourceBefore, Convert.ToHexStringLower(await SHA256.HashDataAsync(input)));
+    }
+
+    [AudioToolsTheory]
+    [InlineData("m4a", "aac", 25)]
+    [InlineData("mp3", "libmp3lame", 32)]
+    public async Task ActualShortRetaggedCandidate_KeepsEverySnapshotStable(string extension, string codec, int seconds)
+    {
+        var source = Path.Combine(root, $"source.{extension}");
+        var candidate = Path.Combine(root, $"candidate.{extension}");
+        var runner = new ReviewAudioCommandRunner(AudioTools.Ffmpeg!);
+        var generated = await runner.ExecuteAsync(false,
+            ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=587:sample_rate=44100",
+                "-t", seconds.ToString(System.Globalization.CultureInfo.InvariantCulture), "-c:a", codec, source], default);
+        Assert.Equal(0, generated.ExitCode);
+        File.Copy(source, candidate);
+        var song = ReviewCopyTagRetagTests.Song();
+        await new TagLibLibraryTagWriter().WriteTagsAsync(candidate, song, AlbumIdentity.FromSong(song));
+        var observations = new List<ReviewAudioSnapshotObservation>();
+        var result = await new ReviewAudioVerifier(runner, snapshotObserver: observations.Add).VerifyAsync(source, candidate);
+        Assert.True(result.Verified, $"{result.FailedStage}:{result.FailureCode}");
+        Assert.All(observations, x =>
+        {
+            Assert.Equal(x.BeforeSize, x.AfterSize);
+            Assert.Equal(x.BeforeModifiedUtcTicks, x.AfterModifiedUtcTicks);
+            if (x.BeforeHash is not null) Assert.Equal(x.BeforeHash, x.AfterHash);
+        });
     }
 
     [AudioToolsTheory]
@@ -128,6 +156,79 @@ public sealed class ReviewAudioVerifierTests : IDisposable
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new ReviewAudioVerifier(new FakeRunner()).VerifyAsync(source, copy, cancel.Token));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SameSizeMutationWithRestoredTimestamp_IsRejectedAndIdentifiesChangedHash(bool candidate)
+    {
+        var source = await Input("source", [1, 2, 3]); var copy = await Input("candidate", [4, 5, 6]);
+        var path = candidate ? copy : source;
+        var stamp = File.GetLastWriteTimeUtc(path);
+        void Mutate()
+        {
+            File.WriteAllBytes(path, [7, 8, 9]);
+            File.SetLastWriteTimeUtc(path, stamp);
+        }
+        var runner = candidate ? new FakeRunner { OnCandidateDecode = Mutate } : new FakeRunner { OnDecode = Mutate };
+        var observations = new List<ReviewAudioSnapshotObservation>();
+        var store = new ProofStore();
+        var result = await new ReviewAudioVerifier(runner, store, snapshotObserver: observations.Add).VerifyAsync(source, copy);
+        Assert.False(result.Verified);
+        Assert.Equal(candidate ? "candidate" : "source", result.FailedStage);
+        Assert.Equal("file_changed_during_verification", result.FailureCode);
+        var difference = Assert.Single(observations, x => x.Path == path && x.Check == "audio_inspection");
+        Assert.Equal(difference.BeforeSize, difference.AfterSize);
+        Assert.Equal(difference.BeforeModifiedUtcTicks, difference.AfterModifiedUtcTicks);
+        Assert.NotEqual(difference.BeforeHash, difference.AfterHash);
+        Assert.DoesNotContain(store.Proofs, x => x.ContentSha256 == difference.AfterHash);
+        Assert.Equal(new ReviewAudioSnapshotFailure("audio_inspection", 3, 3, stamp.Ticks, stamp.Ticks, true), result.SnapshotFailure);
+        var receipt = JsonSerializer.Serialize(result);
+        Assert.DoesNotContain("SnapshotFailure", receipt);
+        Assert.DoesNotContain("BeforeModifiedUtcTicks", receipt);
+        Assert.DoesNotContain(path, receipt);
+    }
+
+    [Fact]
+    public async Task TimestampOnlyMutation_ReportsTheExactDifferenceWithoutChangingTheGuard()
+    {
+        var source = await Input("source", [1, 2, 3]); var copy = await Input("candidate", [4, 5, 6]);
+        var stamp = File.GetLastWriteTimeUtc(copy);
+        var observations = new List<ReviewAudioSnapshotObservation>();
+        var runner = new FakeRunner { OnCandidateDecode = () => File.SetLastWriteTimeUtc(copy, stamp.AddSeconds(1)) };
+        var result = await new ReviewAudioVerifier(runner, snapshotObserver: observations.Add).VerifyAsync(source, copy);
+        Assert.False(result.Verified);
+        Assert.Equal("candidate", result.FailedStage);
+        Assert.Equal("file_changed_during_verification", result.FailureCode);
+        var difference = Assert.Single(observations, x => x.Path == copy && x.Check == "audio_inspection");
+        Assert.Equal(difference.BeforeSize, difference.AfterSize);
+        Assert.Equal(difference.BeforeHash, difference.AfterHash);
+        Assert.NotEqual(difference.BeforeModifiedUtcTicks, difference.AfterModifiedUtcTicks);
+        Assert.Equal(new ReviewAudioSnapshotFailure("audio_inspection", 3, 3,
+            difference.BeforeModifiedUtcTicks, difference.AfterModifiedUtcTicks, false), result.SnapshotFailure);
+    }
+
+    [Theory]
+    [InlineData("audio_inspection", true)]
+    [InlineData("snapshot_hash_read", null)]
+    public void SnapshotFailureLogging_IsStructuredAndContainsOnlyBoundedDiagnostics(string check, bool? hashChanged)
+    {
+        var logger = new CapturingLogger();
+        ReviewCopyProcessor.LogSnapshotFailure(logger, "candidate", null);
+        Assert.Empty(logger.Entries);
+        var failure = new ReviewAudioSnapshotFailure(check, 3, 4, 123, 456, hashChanged);
+        ReviewCopyProcessor.LogSnapshotFailure(logger, "candidate", failure);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Warning, entry.Level);
+        Assert.Null(entry.Exception);
+        var values = entry.Values.Where(x => x.Key != "{OriginalFormat}").ToDictionary(x => x.Key, x => x.Value);
+        Assert.Equal(7, values.Count);
+        Assert.Equal("candidate", values["Stage"]);
+        Assert.Equal(check, values["Check"]);
+        Assert.Equal(3L, values["BeforeSize"]); Assert.Equal(4L, values["AfterSize"]);
+        Assert.Equal(123L, values["BeforeModifiedUtcTicks"]); Assert.Equal(456L, values["AfterModifiedUtcTicks"]);
+        Assert.Equal(hashChanged, values["HashChanged"]);
+    }
+
     [Fact]
     public async Task SourceChangedWhileCandidateIsChecked_IsRefusedAtTheComparisonBoundary()
     {
@@ -170,6 +271,14 @@ public sealed class ReviewAudioVerifierTests : IDisposable
         public Task<ReviewAudioProof?> FindAsync(string version, string contentSha256, CancellationToken ct) =>
             Task.FromResult(Proofs.FirstOrDefault(p => p.Version == version && p.ContentSha256 == contentSha256));
         public Task SaveAsync(ReviewAudioProof proof, CancellationToken ct) { Proofs.Add(proof); return Task.CompletedTask; }
+    }
+    private sealed class CapturingLogger : ILogger
+    {
+        public List<(LogLevel Level, KeyValuePair<string, object?>[] Values, Exception? Exception)> Entries { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => Entries.Add((logLevel, ((IEnumerable<KeyValuePair<string, object?>>)state!).ToArray(), exception));
     }
     private sealed class FakeRunner : IReviewAudioCommandRunner
     {

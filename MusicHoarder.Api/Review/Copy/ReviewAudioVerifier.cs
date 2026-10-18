@@ -10,6 +10,15 @@ namespace MusicHoarder.Api.Review.Copy;
 
 internal sealed class ReviewAudioMetrics { internal long BytesHashed; internal int DecodeAttempts; }
 
+// Optional private diagnostics: never included in the public result or failure code.
+internal sealed record ReviewAudioSnapshotObservation(string Path, string Check,
+    long BeforeSize, long AfterSize, long BeforeModifiedUtcTicks, long AfterModifiedUtcTicks,
+    string? BeforeHash, string? AfterHash);
+
+// Failure-only diagnostics contain no path or hash and do not enter receipt JSON.
+internal sealed record ReviewAudioSnapshotFailure(string Check, long BeforeSize, long AfterSize,
+    long BeforeModifiedUtcTicks, long AfterModifiedUtcTicks, bool? HashChanged);
+
 internal sealed record ReviewAudioStream(string Codec, int SampleRate, int Channels);
 internal sealed record ReviewAudioProof(string Version, string ContentSha256, long SizeBytes,
     string EncodedAudioSha256, string DecodedAudioSha256, IReadOnlyList<ReviewAudioStream> Streams, DateTime VerifiedAtUtc);
@@ -19,6 +28,7 @@ internal sealed record ReviewAudioResult(bool Verified, string? FailedStage, str
     // Observations, not proofs. Keep them internal so historical C receipt JSON stays unchanged.
     internal string? SourceReadSha256 { get; init; }
     internal string? CandidateReadSha256 { get; init; }
+    internal ReviewAudioSnapshotFailure? SnapshotFailure { get; init; }
 }
 
 /// <summary>The durable job store supplies this cache. A content hash alone is never a
@@ -37,7 +47,8 @@ internal interface IReviewAudioCommandRunner
 
 /// <summary>Read-only audio fidelity checks, independent of plan B's persistence/HTTP contract.
 /// No process shell, provider, transcoded output file, musical approval or publication.</summary>
-internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runner, IReviewAudioProofStore? store = null, ReviewAudioMetrics? metrics = null)
+internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runner, IReviewAudioProofStore? store = null,
+    ReviewAudioMetrics? metrics = null, Action<ReviewAudioSnapshotObservation>? snapshotObserver = null)
 {
     internal const string CodeVersion = "review-audio-v1";
     private const string EmptySha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -77,7 +88,7 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
             }
             return new(failure is null, failure is null ? null : "comparison", failure, left, right, leftHit, rightHit) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead };
         }
-        catch (AudioCheckException e) { return new(false, stage, e.Code, left, null, leftHit, false) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead }; }
+        catch (AudioCheckException e) { return new(false, stage, e.Code, left, null, leftHit, false) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead, SnapshotFailure = e.SnapshotFailure }; }
         catch (FileNotFoundException) { return new(false, stage, "file_missing", left, null, leftHit, false) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead }; }
         catch (DirectoryNotFoundException) { return new(false, stage, "file_missing", left, null, leftHit, false) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead }; }
         catch (UnauthorizedAccessException) { return new(false, stage, "file_unreadable", left, null, leftHit, false) { SourceReadSha256 = sourceRead, CandidateReadSha256 = candidateRead }; }
@@ -111,7 +122,10 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         CheckCommand(decoded);
         var decodedHash = ReadHashes(decoded.Output, streams.Count);
         var after = await SnapshotAsync(path, ct);
-        if (before != after) throw new AudioCheckException("file_changed_during_verification");
+        snapshotObserver?.Invoke(new(path, "audio_inspection", before.Size, after.Size,
+            before.Modified.Ticks, after.Modified.Ticks, before.Hash, after.Hash));
+        if (before != after) throw new AudioCheckException("file_changed_during_verification",
+            new("audio_inspection", before.Size, after.Size, before.Modified.Ticks, after.Modified.Ticks, before.Hash != after.Hash));
         var proof = new ReviewAudioProof(version, before.Hash, before.Size, encodedHash, decodedHash, streams, DateTime.UtcNow);
         if (store is not null) await store.SaveAsync(proof, ct);
         return (proof, false);
@@ -134,7 +148,10 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         }
         var hash = Convert.ToHexStringLower(digest.GetHashAndReset());
         info.Refresh();
-        if (length != info.Length || modified != info.LastWriteTimeUtc) throw new AudioCheckException("file_changed_during_verification");
+        snapshotObserver?.Invoke(new(path, "snapshot_hash_read", length, info.Length,
+            modified.Ticks, info.LastWriteTimeUtc.Ticks, null, hash));
+        if (length != info.Length || modified != info.LastWriteTimeUtc) throw new AudioCheckException("file_changed_during_verification",
+            new("snapshot_hash_read", length, info.Length, modified.Ticks, info.LastWriteTimeUtc.Ticks, null));
         return (hash, length, modified);
     }
 
@@ -177,7 +194,11 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
     }
     [GeneratedRegex(@"^(\d+),a,SHA256=([a-fA-F0-9]{64})$")]
     private static partial Regex StreamHash();
-    internal sealed class AudioCheckException(string code) : Exception(code) { internal string Code { get; } = code; }
+    internal sealed class AudioCheckException(string code, ReviewAudioSnapshotFailure? snapshotFailure = null) : Exception(code)
+    {
+        internal string Code { get; } = code;
+        internal ReviewAudioSnapshotFailure? SnapshotFailure { get; } = snapshotFailure;
+    }
 }
 
 /// <summary>Bounded process I/O; always drains both pipes, cancels/kills the whole process tree.

@@ -20,7 +20,7 @@ internal sealed class ReviewCopyFailure(string stage, string code) : Exception(c
 /// hashes and a recoverable old copy. PostgreSQL and the filesystem are separate commit domains.</summary>
 internal sealed class ReviewCopyProcessor(MusicHoarderDbContext db, IFileSystem files,
     ILibraryTagWriter writer, IDestinationPathResolver resolver, IReviewAudioCommandRunner runner,
-    IReviewCopyCheckpoints? checkpoints = null)
+    IReviewCopyCheckpoints? checkpoints = null, ILogger<ReviewCopyProcessor>? logger = null)
 {
     private readonly ReviewAudioVerifier audio = new(runner, new ReviewAudioProofStore(db));
 
@@ -186,9 +186,20 @@ internal sealed class ReviewCopyProcessor(MusicHoarderDbContext db, IFileSystem 
         var tags = ReviewTagVerifier.Verify(path, song);
         if (tags.Count > 0) Fail("tags", "tag_mismatch:" + string.Join(',', tags));
         var result = await audio.VerifyAsync(track.SourcePath, path, ct);
-        if (!result.Verified) Fail("audio:" + result.FailedStage, result.FailureCode ?? "audio_not_verified");
+        if (!result.Verified)
+        {
+            LogSnapshotFailure(logger, result.FailedStage, result.SnapshotFailure);
+            Fail("audio:" + result.FailedStage, result.FailureCode ?? "audio_not_verified");
+        }
         if (result.Source!.ContentSha256 != track.SourceSha256) Fail("source", "source_changed_after_verification");
         track.ProofJson = JsonSerializer.Serialize(new { tagsVersion = ReviewTagVerifier.Version, audio = result }, ReviewCopyJobs.Json);
+    }
+    internal static void LogSnapshotFailure(ILogger? logger, string? stage, ReviewAudioSnapshotFailure? failure)
+    {
+        if (failure is null) return;
+        logger?.LogWarning("Review audio snapshot changed at {Stage}/{Check}: size {BeforeSize} -> {AfterSize}; modified UTC ticks {BeforeModifiedUtcTicks} -> {AfterModifiedUtcTicks}; content hash changed {HashChanged}",
+            stage, failure.Check, failure.BeforeSize, failure.AfterSize, failure.BeforeModifiedUtcTicks,
+            failure.AfterModifiedUtcTicks, failure.HashChanged);
     }
     private async Task Finish(ReviewCopyJob job, ReviewCopyTrack track, SongMetadata song, CancellationToken ct)
     {

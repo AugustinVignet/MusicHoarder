@@ -174,3 +174,26 @@ The only failure is the already-reproduced macOS baseline Web Push private/publi
 key rejection test. Stage C adds 67 passing cases over B, including the earlier
 28 component cases. No Linux/image qualification is implied by these results.
 The private delivery report pins the final source SHA and exported patch.
+
+## MP3 compatibility and retained-job diagnostics
+
+The tag writer does not introduce an ID3v1 block when the source did not have
+one. Existing ID3v1 tags remain supported. This matters when a partial final MPEG
+frame makes a newly appended tag appear inside ffmpeg's last encoded packet.
+Encoded-payload and full decoded-PCM checks remain mandatory and unchanged.
+
+ID3v2.4 is selected per tag for native multi-value fields. Unmapped three-byte
+ID3v2.2 frames are preserved as valid PRIV frames, with their complete rendered
+v2.2 bytes and distinct owners under the `id3v2.2` namespace; they are not emitted
+as malformed v2.4 frame headers or discarded. Existing four-byte unknown frames
+and private metadata remain intact. The original source is never retagged.
+
+Background targeted copy retries resolve their job with both its ID and explicit
+owner, including when no HTTP user exists in the hosted worker. A foreign or
+missing job still returns `job_not_found`. This does not release AutomationHeld
+or authorize another stage or metadata replay.
+
+Snapshot failures remain strict. Failure-only structured diagnostics identify
+the check, before/after sizes and UTC timestamp ticks, and whether content changed;
+they omit paths and hashes. Public failure codes, receipts and audio-cache policy
+are unchanged. A later stable read does not explain an earlier fresh-copy failure.
