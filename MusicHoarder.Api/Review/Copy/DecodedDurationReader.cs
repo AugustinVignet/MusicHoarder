@@ -29,7 +29,10 @@ internal sealed class DecodedDurationReader(string executable, TimeSpan? command
         var errors = ErrorsAsync(process.StandardError, timeout.Token);
         try
         {
-            await Task.WhenAll(output, errors, process.WaitForExitAsync(timeout.Token));
+            // Observe process cancellation before awaiting its pipes: a blocked
+            // pipe reader must not delay killing a stalled decoder and its child.
+            await process.WaitForExitAsync(timeout.Token);
+            await Task.WhenAll(output, errors);
             if (process.ExitCode != 0) return new(null, 0, null, "audio_tool_failed");
             var diagnostic = await errors;
             if (diagnostic.Truncated) return new(null, 0, null, "tool_output_limit");

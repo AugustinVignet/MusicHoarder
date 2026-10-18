@@ -186,9 +186,13 @@ public sealed class ImportAudioQualificationTests : IDisposable
         await File.WriteAllTextAsync(script, "#!/bin/sh\nsleep 30\n");
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var reader = new DecodedDurationReader(script, TimeSpan.FromMilliseconds(100));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         Assert.Equal("audio_tool_timeout", (await reader.ReadAsync("unused", new("mp3", 44100, 2), default)).FailureCode);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), "A pipe reader delayed process timeout.");
+        clock.Restart();
         using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new DecodedDurationReader(script).ReadAsync("unused", new("mp3", 44100, 2), cancel.Token));
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), "A pipe reader delayed requested cancellation.");
     }
 
     private async Task<string> Generate(string extension, string codec)
