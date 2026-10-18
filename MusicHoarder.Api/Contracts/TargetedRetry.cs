@@ -1,8 +1,11 @@
+using System.Text.Json.Serialization;
+
 namespace MusicHoarder.Api.Contracts;
 
 public sealed record TargetedRetryRequest(Guid RequestId, int[] SongIds, string[] Stages,
     bool AllowProviders = false, Guid? CopyJobId = null, bool RecomputeSuccessful = false,
-    bool RespectRetryAfter = true);
+    bool RespectRetryAfter = true,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool ResolveSourceWarnings = false);
 public sealed record TargetedRetryItemResult(int SongId, string Stage, string State, string? Code,
     string? InputSha256, DateTime? StartedAtUtc, DateTime? CompletedAtUtc);
 public sealed record TargetedRetryResult(Guid Id, Guid RequestId, string State, DateTime CreatedAtUtc,

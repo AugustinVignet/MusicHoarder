@@ -130,6 +130,8 @@ internal static class TargetedRetryService
             || request.AllowProviders != request.Stages.Contains("enrichment")
             || request.Stages.Contains("copies") != request.CopyJobId.HasValue)
             throw Error(400, "invalid_targeted_retry", "Supply a nonempty request UUID, 1..200 distinct IDs, and ordered explicit stages fingerprint/enrichment/copies. Enrichment requires allowProviders; copies requires copyJobId. No scan/build/dedup side effects are inferred.");
+        if (request.ResolveSourceWarnings && !request.Stages.Contains("fingerprint"))
+            throw Error(400, "invalid_targeted_retry", "Resolving source warnings requires an explicit fingerprint qualification stage.");
     }
     internal static ReviewPlanException Error(int status, string code, string message) => new(status, new(code, message));
     internal static ReviewPlanException Busy() => Error(409, "writer_busy", "A selected track or library writer is active. Retry later; nothing was queued.");
