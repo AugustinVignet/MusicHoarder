@@ -340,7 +340,7 @@ public sealed class TargetedRetryTests : IDisposable
         }
         Assert.Null(Assert.Single(retry.Items).Code);
         Assert.Equal("completed", retry.State); Assert.Equal("success", Assert.Single(retry.Items).State);
-        using var replay = await client.PostAsJsonAsync("/api/review/retries", request);
+        using var replay = await CreateWithBusyRetry();
         replay.EnsureSuccessStatusCode();
         Assert.Equal(retry.Id, (await replay.Content.ReadFromJsonAsync<TargetedRetryResult>())!.Id);
         await app.StopAsync();
