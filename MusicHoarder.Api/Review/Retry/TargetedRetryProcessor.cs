@@ -68,7 +68,7 @@ internal sealed class TargetedRetryProcessor(MusicHoarderDbContext db, IFileSyst
                             .SingleOrDefaultAsync(s => s.SongId == song.Id && s.Stage == "fingerprint", ct);
                         if (!request.RecomputeSuccessful && FingerprintStage.FreshAccepted(prior, song, hash))
                         { Complete(item, "skipped", "already_valid"); await Save(job, ct); continue; }
-                        var result = await FingerprintStage.ExecuteAsync(db, song, song.SourcePath, files, fpcalc, tools, job.Id, ct);
+                        var result = await FingerprintStage.ExecuteAsync(db, song, song.SourcePath, files, fpcalc, tools, job.Id, ct, request.ResolveSourceWarnings);
                         // The stage journal and fingerprint are already one database receipt. A crash
                         // here is recovered above without invoking fpcalc or a provider again.
                         if (checkpoints is not null) await checkpoints.ReachedAsync("recorded:fingerprint", song.Id, ct);

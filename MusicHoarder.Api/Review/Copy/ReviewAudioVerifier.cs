@@ -43,6 +43,8 @@ internal sealed record AudioCommandResult(int? ExitCode, string Output, string E
 internal interface IReviewAudioCommandRunner
 {
     Task<AudioCommandResult> RunAsync(bool probe, IReadOnlyList<string> arguments, CancellationToken ct);
+    Task<DecodedDurationResult> MeasureDurationAsync(string path, ReviewAudioStream stream, CancellationToken ct)
+        => Task.FromResult(new DecodedDurationResult(null, 0, null, "duration_measurement_unavailable"));
 }
 
 /// <summary>Read-only audio fidelity checks, independent of plan B's persistence/HTTP contract.
@@ -70,7 +72,7 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
                 if (string.IsNullOrWhiteSpace(version.Output)) throw new AudioCheckException("invalid_tool_output");
                 versions.Add(version.Output);
             }
-            var key = CodeVersion + ":" + Hash(string.Join('\n', versions));
+            var key = CodeVersion + ":id3-comment-v1:" + Hash(string.Join('\n', versions));
             stage = "source";
             (left, leftHit) = await InspectAsync(source, key, ct, hash => sourceRead = hash);
             stage = "candidate";
@@ -109,17 +111,22 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         }
         var probe = await runner.RunAsync(true,
             ["-v", "error", "-select_streams", "a", "-show_entries", "stream=index,codec_name,sample_rate,channels", "-of", "json", path], ct);
-        CheckCommand(probe);
+        CheckCommand(probe, Path.GetExtension(path).Equals(".mp3", StringComparison.OrdinalIgnoreCase));
         var streams = ReadStreams(probe.Output);
+        // Only this precise MP3 metadata diagnostic is harmless. Every audio decode,
+        // stream/hash check and unknown diagnostic still has to succeed in full.
+        var mp3 = Path.GetExtension(path).Equals(".mp3", StringComparison.OrdinalIgnoreCase)
+            && streams.All(s => s.Codec == "mp3");
+        CheckCommand(probe, mp3);
         var common = new[] { "-nostdin", "-hide_banner", "-v", "error", "-xerror", "-err_detect", "explode", "-i", path, "-map", "0:a" };
         var encoded = await runner.RunAsync(false, [.. common, "-c:a", "copy", "-f", "streamhash", "-hash", "sha256", "-"], ct);
-        CheckCommand(encoded);
+        CheckCommand(encoded, mp3);
         var encodedHash = ReadHashes(encoded.Output, streams.Count);
         // Decode the ENTIRE file, with no resampling/channel folding or normalization.
         // This catches invalid/truncated frames even when the demuxed payload can be hashed.
         if (metrics is not null) metrics.DecodeAttempts++;
         var decoded = await runner.RunAsync(false, [.. common, "-c:a", "pcm_s32le", "-f", "streamhash", "-hash", "sha256", "-"], ct);
-        CheckCommand(decoded);
+        CheckCommand(decoded, mp3);
         var decodedHash = ReadHashes(decoded.Output, streams.Count);
         var after = await SnapshotAsync(path, ct);
         snapshotObserver?.Invoke(new(path, "audio_inspection", before.Size, after.Size,
@@ -185,13 +192,23 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
     }
     private static bool IsHash(string value) => value.Length == 64 && value.All(Uri.IsHexDigit) && !value.Equals(EmptySha256, StringComparison.OrdinalIgnoreCase);
     private static string Hash(string value) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
-    private static void CheckCommand(AudioCommandResult result)
+    private static void CheckCommand(AudioCommandResult result, bool mp3 = false)
     {
         if (result.Failure is not null) throw new AudioCheckException(result.Failure);
         if (result.Truncated) throw new AudioCheckException("tool_output_limit");
         if (result.ExitCode != 0) throw new AudioCheckException("audio_tool_failed");
-        if (!string.IsNullOrWhiteSpace(result.Errors)) throw new AudioCheckException("audio_errors_reported");
+        if (!string.IsNullOrWhiteSpace(result.Errors) && !(mp3 && KnownId3CommentDiagnostics(result.Errors)))
+            throw new AudioCheckException("audio_errors_reported");
     }
+    internal static bool KnownId3CommentDiagnostics(string errors)
+    {
+        var lines = errors.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(line => Id3DiagnosticPrefix().Replace(line, "")).ToArray();
+        return lines.Length > 0 && lines.Length % 2 == 0
+            && lines.Where((line, i) => line != (i % 2 == 0 ? "Incorrect BOM value" : "Error reading comment frame, skipped")).Any() == false;
+    }
+    [GeneratedRegex(@"^\[mp3 @ 0x[0-9a-fA-F]+\] ")]
+    private static partial Regex Id3DiagnosticPrefix();
     [GeneratedRegex(@"^(\d+),a,SHA256=([a-fA-F0-9]{64})$")]
     private static partial Regex StreamHash();
     internal sealed class AudioCheckException(string code, ReviewAudioSnapshotFailure? snapshotFailure = null) : Exception(code)
@@ -205,6 +222,8 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
 /// Failure codes never include private paths or unbounded ffmpeg diagnostics.</summary>
 internal sealed class ReviewAudioCommandRunner(string ffmpegPath, TimeSpan? commandTimeout = null) : IReviewAudioCommandRunner
 {
+    public Task<DecodedDurationResult> MeasureDurationAsync(string path, ReviewAudioStream stream, CancellationToken ct)
+        => new DecodedDurationReader(ffmpegPath, commandTimeout).ReadAsync(path, stream, ct);
     internal async Task<AudioCommandResult> ExecuteAsync(bool probe, IReadOnlyList<string> arguments, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();

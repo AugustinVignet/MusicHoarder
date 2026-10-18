@@ -89,7 +89,38 @@ requires explicit IDs and **all** downstream permissions:
 It refuses unfinished jobs, source drift, stale/missing fingerprint evidence or
 unresolved source warnings. It permits normal automation for those rows rather
 than performing those stages itself. C's manual plan/approval still protects its
-songs. No warning-clear or exception accepting a code-3 candidate is provided.
+songs. No exception accepting a code-3 candidate is provided.
+
+### Explicit source requalification
+
+Fingerprint retries may additionally set `resolveSourceWarnings: true` (default
+false, omitted from default request JSON to preserve historical idempotency).
+This requires the fingerprint stage. It resolves the **current** source warning
+only after fresh successful fpcalc validation, a complete encoded/decoded audio
+proof and unchanged source content. Candidate evidence records the old warning,
+input hash and attempt count; all old attempt receipts remain untouched. A failed
+or unqualified check cannot clear the warning. No automatic worker, identification
+or restart clears it. The automation hold remains until separately resumed.
+
+The audio verifier recognizes only the complete known pair `Incorrect BOM value`
+and `Error reading comment frame, skipped` for actual MP3 streams in MP3 files.
+It still requires successful probes, nonempty complete hashes, clean full decode,
+stable input and no additional diagnostic. Other formats/errors/nonzero exits
+stay refused. Its policy-specific proof key prevents reuse of older cache entries.
+
+If source-tag and fingerprint duration estimates disagree (or the tag estimate
+is absent), a single audio stream can be measured by counting fully decoded
+32-bit PCM samples at the original sample rate and channel count. The resulting
+PCM digest must equal the complete source-audio proof. Store measured duration
+in seconds/milliseconds and retain both old estimates, sample count and method
+in candidate evidence. Do not prefer one estimate or silently widen a tolerance.
+This is a technical measurement, not proof that the intended song is complete:
+particularly large differences require musical/programme review before resuming
+automatic builds. Ordinary imports retain the qualification fence for a duration
+disagreement even when measurement succeeds; only targeted work can accept the
+measured result, with its automation hold preserved. No source rewrite,
+transcode or additional provider call is
+performed by qualification.
 
 ## Source quality and fpcalc
 
