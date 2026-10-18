@@ -298,6 +298,175 @@ public sealed class TargetedRetryTests : IDisposable
     }
 
     [PostgresFact]
+    public async Task NonDemoOwner_HttpAcceptedCopyRetryRunsInAnonymousHostedScope_WithoutReplayingOtherWork()
+    {
+        await using var store = await Store.CreateAsync();
+        var reviewer = TestCurrentUserAccessor.OwnerUser with { Id = Guid.NewGuid(), Email = "copy-owner@test.local" };
+        var (songs, copyId) = await StoppedCopyJob(store, reviewer);
+        var untouched = JsonSerializer.Serialize(await store.Db.ReviewCopyTracks.AsNoTracking()
+            .Where(t => t.SongId != songs[1].Id).OrderBy(t => t.SongId).ToArrayAsync());
+        var metadata = JsonSerializer.Serialize(ReviewFields.Values(await store.Db.Songs.AsNoTracking()
+            .SingleAsync(s => s.Id == songs[1].Id)));
+        var sourceHashes = songs.Select(s => ReviewCopyJobs.HashIfPresent(files, s.SourcePath)).ToArray();
+        var fp = new FakeFp(_ => Good); var provider = new FakeEnrichment(); var writer = new CountingTagWriter();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = Environments.Production });
+        builder.WebHost.UseUrls("http://127.0.0.1:0"); builder.Logging.ClearProviders();
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddScoped<ICurrentUserAccessor, HttpContextCurrentUserAccessor>();
+        builder.Services.AddDbContext<MusicHoarderDbContext>(o => o.UseNpgsql(store.ConnectionString));
+        builder.EnrichNpgsqlDbContext<MusicHoarderDbContext>();
+        builder.Services.AddSingleton(files); builder.Services.AddSingleton(Resolver);
+        builder.Services.AddSingleton<IFpcalcService>(fp); builder.Services.AddSingleton<ITargetedEnrichmentRunner>(provider);
+        builder.Services.AddSingleton<IReviewAudioCommandRunner>(Tools); builder.Services.AddSingleton<ILibraryTagWriter>(writer);
+        builder.Services.AddScoped<ReviewCopyProcessor>(); builder.Services.AddScoped<TargetedRetryProcessor>();
+        builder.Services.AddHostedService<TargetedRetryBackgroundService>();
+        await using var app = builder.Build();
+        app.Use((context, next) =>
+        {
+            context.Items[HttpContextCurrentUserAccessor.HttpContextItemKey] = reviewer;
+            return next(context);
+        });
+        app.MapAlbumReviewEndpoints(); await app.StartAsync();
+        using var client = new HttpClient { BaseAddress = new Uri(app.Services.GetRequiredService<IServer>()
+            .Features.Get<IServerAddressesFeature>()!.Addresses.Single()) };
+        var request = Request([songs[1].Id], ["copies"], copy: copyId);
+        using var created = await CreateWithBusyRetry(); created.EnsureSuccessStatusCode();
+        var retry = (await created.Content.ReadFromJsonAsync<TargetedRetryResult>())!;
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (retry.State is "pending" or "running" && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+            retry = (await client.GetFromJsonAsync<TargetedRetryResult>($"/api/review/retries/{retry.Id}"))!;
+        }
+        Assert.Null(Assert.Single(retry.Items).Code);
+        Assert.Equal("completed", retry.State); Assert.Equal("success", Assert.Single(retry.Items).State);
+        using var replay = await client.PostAsJsonAsync("/api/review/retries", request);
+        replay.EnsureSuccessStatusCode();
+        Assert.Equal(retry.Id, (await replay.Content.ReadFromJsonAsync<TargetedRetryResult>())!.Id);
+        await app.StopAsync();
+        Assert.Equal(1, writer.Calls); Assert.Equal(0, fp.Calls); Assert.Equal(0, provider.Calls);
+        await using var observed = NewDb(store);
+        Assert.Equal(untouched, JsonSerializer.Serialize(await observed.ReviewCopyTracks.AsNoTracking()
+            .Where(t => t.SongId != songs[1].Id).OrderBy(t => t.SongId).ToArrayAsync()));
+        var selected = await observed.Songs.SingleAsync(s => s.Id == songs[1].Id);
+        Assert.Equal(metadata, JsonSerializer.Serialize(ReviewFields.Values(selected)));
+        Assert.True(selected.AutomationHeld);
+        Assert.Equal(sourceHashes, songs.Select(s => ReviewCopyJobs.HashIfPresent(files, s.SourcePath)).ToArray());
+        var copied = await observed.ReviewCopyTracks.SingleAsync(t => t.SongId == selected.Id);
+        Assert.Equal("published", copied.State); Assert.NotNull(copied.ProofJson); Assert.Equal(2, copied.Attempts);
+        Assert.Equal("needsAttention", (await observed.ReviewCopyJobs.SingleAsync()).State);
+        Assert.Empty(await observed.SongProviderAttempts.ToArrayAsync());
+        Assert.Equal("copies", Assert.Single(await observed.PipelineStageAttempts.ToArrayAsync()).Stage);
+        Assert.False((await observed.Songs.SingleAsync(s => s.Id == songs[0].Id)).AutomationHeld);
+        Assert.False((await observed.Songs.SingleAsync(s => s.Id == songs[2].Id)).AutomationHeld);
+
+        async Task<HttpResponseMessage> CreateWithBusyRetry()
+        {
+            var until = DateTime.UtcNow.AddSeconds(5);
+            while (true)
+            {
+                var response = await client.PostAsJsonAsync("/api/review/retries", request);
+                if (response.StatusCode != System.Net.HttpStatusCode.Conflict || DateTime.UtcNow >= until) return response;
+                Assert.Equal("writer_busy", (await response.Content.ReadFromJsonAsync<ReviewPlanError>())!.Code);
+                response.Dispose(); await Task.Delay(25);
+            }
+        }
+    }
+
+    [PostgresFact]
+    public async Task NonDemoOwner_InterruptedCopyRetryResumesInNewAnonymousScope_AndKeepsAutomationHeld()
+    {
+        await using var store = await Store.CreateAsync();
+        var reviewer = TestCurrentUserAccessor.OwnerUser with { Id = Guid.NewGuid(), Email = "restart-owner@test.local" };
+        var (songs, copyId) = await StoppedCopyJob(store, reviewer);
+        await using var requestDb = ScopedDb(store, reviewer);
+        var retry = await TargetedRetryService.CreateAsync(requestDb, files, reviewer.Id,
+            Request([songs[1].Id], ["copies"], copy: copyId), default);
+        var writer = new CountingTagWriter(); var fp = new FakeFp(_ => Good); var provider = new FakeEnrichment();
+        await using (var interrupted = ScopedDb(store))
+        {
+            var processor = new TargetedRetryProcessor(interrupted, files, fp, Tools, provider,
+                new(interrupted, files, writer, Resolver, Tools), new Points("started:copies"));
+            await Assert.ThrowsAsync<OperationCanceledException>(() => processor.RunNextAsync(default));
+        }
+        Assert.Equal(0, writer.Calls);
+        await using (var restarted = ScopedDb(store))
+        {
+            var processor = new TargetedRetryProcessor(restarted, files, fp, Tools, provider,
+                new(restarted, files, writer, Resolver, Tools));
+            Assert.True(await processor.RunNextAsync(default));
+            Assert.False(await processor.RunNextAsync(default));
+        }
+        await using var observed = NewDb(store);
+        var result = await TargetedRetryService.GetAsync(observed, reviewer.Id, retry.Id, default);
+        Assert.Equal("completed", result.State); Assert.Equal("success", Assert.Single(result.Items).State);
+        Assert.Equal(1, writer.Calls); Assert.Equal(0, fp.Calls); Assert.Equal(0, provider.Calls);
+        Assert.True((await observed.Songs.SingleAsync(s => s.Id == songs[1].Id)).AutomationHeld);
+        Assert.Single(await observed.PipelineStageAttempts.ToArrayAsync());
+    }
+
+    [PostgresTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CopyJobLookup_UsesExplicitOwner_AndStillRejectsForeignOrMissingJobs(bool foreignAmbientUser)
+    {
+        await using var store = await Store.CreateAsync();
+        var reviewer = TestCurrentUserAccessor.OwnerUser with { Id = Guid.NewGuid(), Email = "lookup-owner@test.local" };
+        var (songs, copyId) = await StoppedCopyJob(store, reviewer);
+        await using var background = ScopedDb(store, foreignAmbientUser ? TestCurrentUserAccessor.DemoUser : null);
+        var owned = await ReviewCopyJobs.OwnedAsync(background, reviewer.Id, copyId, default);
+        Assert.Equal(reviewer.Id, owned.OwnerUserId); Assert.Equal(3, owned.Tracks.Count);
+        foreach (var (owner, id) in new[] { (TestUsers.OwnerId, copyId), (reviewer.Id, Guid.NewGuid()) })
+        {
+            var error = await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewCopyJobs.OwnedAsync(background, owner, id, default));
+            Assert.Equal(404, error.StatusCode); Assert.Equal("job_not_found", error.Error.Code);
+        }
+        var foreignSong = ReviewCopyTagRetagTests.Song(); foreignSong.OwnerUserId = Owner;
+        foreignSong.SourcePath = songs[0].SourcePath; foreignSong.EnrichmentStatus = EnrichmentStatus.Matched;
+        store.Db.Songs.Add(foreignSong); await store.Db.SaveChangesAsync();
+        foreach (var id in new[] { copyId, Guid.NewGuid() })
+        {
+            var error = await Assert.ThrowsAsync<ReviewPlanException>(() => TargetedRetryService.CreateAsync(store.Db, files, Owner,
+                Request([foreignSong.Id], ["copies"], copy: id), default));
+            Assert.Equal(404, error.StatusCode); Assert.Equal("job_not_found", error.Error.Code);
+        }
+        await using var observed = NewDb(store);
+        Assert.Empty(await observed.TargetedRetryJobs.ToArrayAsync());
+        Assert.False((await observed.Songs.SingleAsync(s => s.Id == foreignSong.Id)).AutomationHeld);
+        Assert.Equal("needsAttention", (await observed.ReviewCopyJobs.SingleAsync()).State);
+    }
+
+    private async Task<(SongMetadata[] Songs, Guid CopyId)> StoppedCopyJob(Store store, CurrentUser reviewer)
+    {
+        store.Db.Users.Add(new User { Id = reviewer.Id, Email = reviewer.Email,
+            EmailNormalized = User.Normalize(reviewer.Email), Role = UserRole.Admin, CreatedAtUtc = DateTime.UtcNow });
+        var songs = await AddSongs(store.Db, 3);
+        foreach (var song in songs)
+        { song.OwnerUserId = reviewer.Id; song.EnrichmentStatus = EnrichmentStatus.Matched; song.TrackNumber = song.Id; }
+        await store.Db.SaveChangesAsync();
+        var scope = new AlbumReviewContextRequest([root], songs.Select(s => s.Id).ToArray());
+        var context = await AlbumReviewContextReader.ReadAsync(store.Db, files, reviewer.Id, scope, default);
+        var plan = await ReviewPlanService.PreviewAsync(store.Db, files, Resolver, reviewer.Id, new(scope, context.Revision,
+            "Synthetic owner-scoped copy retry", ["fixture:owner-programme"], songs.Select(s => new ReviewPlanTrackRequest(s.Id, false,
+                JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("{\"Genre\":\"Reviewed\"}")!)).ToArray()), default);
+        var applied = await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, reviewer.Id, plan.Id, plan.Revision, default);
+        await new ReviewCopyProcessor(store.Db, files, new TagLibLibraryTagWriter(), Resolver, Tools,
+            new CopyFailures(songs[0].Id)).RunNextAsync(default);
+        return (songs, applied.JobId!.Value);
+    }
+
+    private static MusicHoarderDbContext ScopedDb(Store store, CurrentUser? user = null)
+        => new(new DbContextOptionsBuilder().UseNpgsql(store.ConnectionString, pg => pg.EnableRetryOnFailure()).Options,
+            new TestCurrentUserAccessor(user));
+
+    private sealed class CountingTagWriter : ILibraryTagWriter
+    {
+        internal int Calls { get; private set; }
+        public Task WriteTagsAsync(string path, SongMetadata song, AlbumIdentity albumIdentity, CancellationToken ct = default)
+        { Calls++; return new TagLibLibraryTagWriter().WriteTagsAsync(path, song, albumIdentity, ct); }
+    }
+
+    [PostgresFact]
     public async Task Migration86_UpDownUp_PreservesCJobsAndSongs()
     {
         await using var store = await Store.CreateAsync(true); Assert.False(store.Db.Database.HasPendingModelChanges());

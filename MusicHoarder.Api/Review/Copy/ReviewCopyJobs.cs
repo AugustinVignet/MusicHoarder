@@ -101,8 +101,10 @@ internal static class ReviewCopyJobs
                 new ReviewCopyTrackResult(t.SongId, t.State, t.Attempts, t.FailureStage, t.FailureCode,
                     ReviewTimestamp.Persisted(t.UpdatedAtUtc), t.DestinationPath, t.ProofJson != null, t.ProofJson)).ToArray());
     }
+    // Hosted retries have no HTTP user. The explicit owner remains the authorization boundary.
     internal static async Task<ReviewCopyJob> OwnedAsync(MusicHoarderDbContext db, Guid owner, Guid id, CancellationToken ct)
-        => await db.ReviewCopyJobs.Include(j => j.Tracks).SingleOrDefaultAsync(j => j.Id == id && j.OwnerUserId == owner, ct)
+        => await db.ReviewCopyJobs.IgnoreQueryFilters().Include(j => j.Tracks)
+            .SingleOrDefaultAsync(j => j.Id == id && j.OwnerUserId == owner, ct)
             ?? throw new ReviewPlanException(404, new("job_not_found", "Job unavailable to this owner."));
 
     internal static async Task RetryAsync(MusicHoarderDbContext db, Guid owner, Guid id, CancellationToken ct)
