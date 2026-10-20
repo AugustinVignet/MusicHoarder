@@ -107,7 +107,16 @@ and scores never establish a match. Without a selected reference, completeness
 is unknown. Equal recording IDs never remove an album membership.
 
 Each response has a 4000 evidence-row / 2 MiB budget; selected+blocking evidence
-and the related page share that budget. Oversized unpageable evidence returns
+and the related page share that budget. The requested related `limit` is a maximum:
+the server can shorten that page to stay within both budgets, including when
+related tracks repeat evidence already present in `blockingRelated`. Follow
+`nextCursor` rather than inferring completion from a short page. The cursor
+resumes after the last row actually returned; all selected tracks, required
+blockers and the context revision remain unchanged. No related row is skipped.
+If the mandatory evidence or even one related row cannot fit, the request still
+fails explicitly instead of returning an empty nonterminal page or removing a
+dependency. This behavior also applies to B's internal context read.
+Oversized unpageable evidence returns
 413 `evidence_too_large`, oversized selection 413 `scope_too_large`, without a
 partial packet presented as complete.
 

@@ -227,27 +227,48 @@ internal static class AlbumAuditReader
             """, P("owner", owner), P("ids", ids), P("last", prior?.LastId ?? 0), P("limit", request.Limit + 1)).ToListAsync(ct);
         var pageIds = page.Take(request.Limit).Select(p => p.Id).ToArray();
         var pageSongs = await AlbumReviewContextReader.Project(owned.Where(s => pageIds.Contains(s.Id))).ToDictionaryAsync(s => s.Id, ct);
-        var pageEvidence = pageIds.Length == 0 ? null : await EvidenceAsync(db, files, owner, pageSongs,
-            page.Take(request.Limit).ToDictionary(p => p.Id, p => new SortedSet<string>(p.Reasons, StringComparer.Ordinal)), [], [], [], ct, includePrograms: false);
         var members = evidence.Tracks.Where(t => ids.Contains(t.Id)).ToArray();
         var (facts, correspondences) = ProgramFacts(members, reference);
         var scope = new AlbumReviewContextRequest([], ids, new(Version, ids, request.Reference));
         var planPacket = ready ? evidence with { Revision = revision } : null;
-        var packet = new AlbumAuditContext(Version, DateTime.UtcNow, members,
-            pageEvidence?.Tracks.Select(t => new AlbumAuditRelated(t, page.Single(p => p.Id == t.Id).Blocking)).ToArray() ?? [],
-            evidence.Tracks.Where(t => !ids.Contains(t.Id)).ToArray(),
-            stats.Count, stats.BlockingCount, blockers.Take(200).Select(b => b.Id).ToArray(), true, page.Count <= request.Limit,
-            page.Count > request.Limit ? Encode(new(Version, binding, revision, "", pageIds[^1]), codec) : null,
-            reference is null ? "absent" : reference.TrackCountContested || reference.Tracks.Any(t => t.IsContested) ? "contested" : "available",
-            references, correspondences, facts, evidence.Duplicates, evidence.Conflicts, ready,
-            ready ? new(scope, revision) : null, revision, membershipRevision, evidenceRevision, stats.Revision, false,
-            reference is null ? "unknownWithoutReference" : "referenceHypothesisOnly");
-        var uniqueTracks = evidence.Tracks.Concat(pageEvidence?.Tracks ?? []).DistinctBy(t => t.Id);
-        var rowCount = links.Count + uniqueTracks.Sum(t => t.Changes.Count + t.Candidates.Count)
-            + references.Sum(r => r.Program.Tracks.Count + r.Program.Sources.Count + 1);
-        if (rowCount > 4000) throw TooLarge();
-        if (JsonSerializer.SerializeToUtf8Bytes(packet, Json).Length > AlbumReviewContextReader.MaxResponseBytes - 256) throw TooLarge();
-        return new(packet, planPacket);
+        // The selected tracks and every blocking dependency are immutable across pages.
+        // Only shorten the related prefix; its cursor must resume after the last returned row.
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            AlbumReviewContext? pageEvidence;
+            try
+            {
+                pageEvidence = pageIds.Length == 0 ? null : await EvidenceAsync(db, files, owner,
+                    pageIds.ToDictionary(id => id, id => pageSongs[id]),
+                    page.Take(pageIds.Length).ToDictionary(p => p.Id, p => new SortedSet<string>(p.Reasons, StringComparer.Ordinal)),
+                    [], [], [], ct, includePrograms: false);
+            }
+            catch (AlbumReviewReadException error) when (error.StatusCode == 413 && pageIds.Length > 1)
+            {
+                pageIds = pageIds.Take((pageIds.Length + 1) / 2).ToArray();
+                continue;
+            }
+            var packet = new AlbumAuditContext(Version, DateTime.UtcNow, members,
+                pageEvidence?.Tracks.Select(t => new AlbumAuditRelated(t, page.Single(p => p.Id == t.Id).Blocking)).ToArray() ?? [],
+                evidence.Tracks.Where(t => !ids.Contains(t.Id)).ToArray(),
+                stats.Count, stats.BlockingCount, blockers.Take(200).Select(b => b.Id).ToArray(), true, page.Count <= pageIds.Length,
+                page.Count > pageIds.Length ? Encode(new(Version, binding, revision, "", pageIds[^1]), codec) : null,
+                reference is null ? "absent" : reference.TrackCountContested || reference.Tracks.Any(t => t.IsContested) ? "contested" : "available",
+                references, correspondences, facts, evidence.Duplicates, evidence.Conflicts, ready,
+                ready ? new(scope, revision) : null, revision, membershipRevision, evidenceRevision, stats.Revision, false,
+                reference is null ? "unknownWithoutReference" : "referenceHypothesisOnly");
+            var uniqueTracks = evidence.Tracks.Concat(pageEvidence?.Tracks ?? []).DistinctBy(t => t.Id);
+            var rowCount = links.Count + uniqueTracks.Sum(t => t.Changes.Count + t.Candidates.Count)
+                + references.Sum(r => r.Program.Tracks.Count + r.Program.Sources.Count + 1);
+            if (rowCount <= AlbumReviewContextReader.MaxEvidenceRows
+                && JsonSerializer.SerializeToUtf8Bytes(packet, Json).Length <= AlbumReviewContextReader.MaxResponseBytes - 256)
+                return new(packet, planPacket);
+            // An individual related row that cannot fit must remain an explicit refusal.
+            // Never skip it, return an empty nonterminal page, or omit blocking evidence.
+            if (pageIds.Length <= 1) throw TooLarge();
+            pageIds = pageIds.Take((pageIds.Length + 1) / 2).ToArray();
+        }
     }
 
     private static async Task<AlbumReviewContext> EvidenceAsync(MusicHoarderDbContext db, IFileSystem files, Guid owner,

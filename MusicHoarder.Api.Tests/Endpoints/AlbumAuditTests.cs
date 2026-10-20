@@ -310,6 +310,108 @@ public sealed class AlbumAuditTests
         Assert.NotEqual(first.ContextRevision, (await Read(fresh, [1])).ContextRevision);
     }
 
+    [PostgresFact]
+    public async Task RelatedByteBudgetShortensOnlyThePage_ProtectsAllBlockers_AndResumesWithoutOmissions()
+    {
+        await using var store = await Store.CreateAsync();
+        store.Db.AddRange(Enumerable.Range(1, 61).Select(i => Song(i)));
+        store.Db.SongMetadataChanges.AddRange(Enumerable.Range(1, 61).SelectMany(id => Enumerable.Range(1, 15)
+            .Select(i => new SongMetadataChange { SongId = id, FieldName = "Title", Source = "fixture",
+                NewValue = new string('x', 1300) + "é", CreatedAtUtc = Stamp })));
+        await store.Db.SaveChangesAsync(); store.Db.ChangeTracker.Clear();
+        var before = JsonSerializer.Serialize(await store.Db.Songs.AsNoTracking().OrderBy(s => s.Id).ToArrayAsync());
+        var small = await Read(store.Db, [1], limit: 1);
+        var page = await Read(store.Db, [1], limit: 100);
+        Assert.True(page.Related.Count is > 0 and < 60);
+        Assert.Equal(small.ContextRevision, page.ContextRevision);
+        var first = page; var seen = new HashSet<int>();
+        while (true)
+        {
+            Assert.True(page.PlanReady); Assert.True(page.SelectionComplete);
+            Assert.Equal(Enumerable.Range(2, 60), page.BlockingRelated.Select(t => t.Id));
+            Assert.Equal(Enumerable.Range(2, 60), page.BlockingRelatedIds);
+            Assert.Equal(60, page.BlockingRelatedCount); Assert.Equal(60, page.RelatedCount);
+            Assert.Equal(first.ContextRevision, page.ContextRevision);
+            Assert.Equal(JsonSerializer.Serialize(first.PlanContext), JsonSerializer.Serialize(page.PlanContext));
+            Assert.True(JsonSerializer.SerializeToUtf8Bytes(page, new JsonSerializerOptions(JsonSerializerDefaults.Web)).Length
+                <= AlbumReviewContextReader.MaxResponseBytes - 256);
+            Assert.NotEmpty(page.Related);
+            Assert.All(page.Related, row => Assert.True(seen.Add(row.Track.Id)));
+            Assert.Equal(page.NextCursor is null, page.RelatedComplete);
+            if (page.NextCursor is null) break;
+            page = await Read(store.Db, [1], cursor: page.NextCursor, limit: 100);
+        }
+        Assert.Equal(Enumerable.Range(2, 60), seen.Order());
+        Assert.Equal(before, JsonSerializer.Serialize(await store.Db.Songs.AsNoTracking().OrderBy(s => s.Id).ToArrayAsync()));
+        // B's internal default page must use the same bounded read and complete revision.
+        var preview = await ReviewPlanService.PreviewAsync(store.Db, Files, Resolver, Owner, Plan(first), default);
+        Assert.True(preview.CanApply);
+        await store.Db.Songs.Where(s => s.Id == 61).ExecuteUpdateAsync(s => s.SetProperty(x => x.Genre, "Changed dependency"));
+        var stale = await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewPlanService.PreviewAsync(store.Db, Files, Resolver, Owner, Plan(first), default));
+        Assert.Equal(409, stale.StatusCode);
+        var stalePage = await AlbumAuditEndpoints.Context(new([1], Cursor: first.NextCursor, Limit: 100), store.Db, User, Files, default);
+        Assert.Equal("context_changed", Value<AlbumReviewError>(stalePage).Code);
+    }
+
+    [PostgresFact]
+    public async Task RelatedRowBudgetShortensThePrefix_AndContinuationIncludesEveryRemainingRow()
+    {
+        await using var store = await Store.CreateAsync();
+        store.Db.AddRange(Enumerable.Range(1, 11).Select(i => Song(i, $"Different {i}")));
+        store.Db.SongMetadataChanges.AddRange(Enumerable.Range(1, 11).SelectMany(id => Enumerable.Range(1, id == 1 ? 3500 : 75)
+            .Select(i => new SongMetadataChange { SongId = id, FieldName = "Title", Source = "fixture", NewValue = "Observed", CreatedAtUtc = Stamp })));
+        await store.Db.SaveChangesAsync(); store.Db.ChangeTracker.Clear();
+        var first = await Read(store.Db, [1], limit: 100);
+        Assert.True(first.Related.Count is > 0 and < 10); Assert.False(first.RelatedComplete);
+        Assert.Equal(3500, Assert.Single(first.Members).Changes.Count); Assert.Empty(first.BlockingRelated);
+        var seen = first.Related.Select(r => r.Track.Id).ToList(); var next = first.NextCursor;
+        while (next is not null)
+        {
+            var page = await Read(store.Db, [1], cursor: next, limit: 100);
+            Assert.Equal(first.ContextRevision, page.ContextRevision); Assert.NotEmpty(page.Related);
+            Assert.True(page.Members.Concat(page.Related.Select(r => r.Track)).Sum(t => t.Changes.Count + t.Candidates.Count)
+                <= AlbumReviewContextReader.MaxEvidenceRows);
+            seen.AddRange(page.Related.Select(r => r.Track.Id)); next = page.NextCursor;
+        }
+        Assert.Equal(Enumerable.Range(2, 10), seen); Assert.Equal(seen.Count, seen.Distinct().Count());
+    }
+
+    [PostgresFact]
+    public async Task RelatedPageThatExceedsItsOwnRowBudgetCanStillContinueFromAnAdmissiblePrefix()
+    {
+        await using var store = await Store.CreateAsync();
+        store.Db.AddRange(Enumerable.Range(1, 101).Select(i => Song(i, $"Different {i}")));
+        store.Db.SongMetadataChanges.AddRange(Enumerable.Range(2, 100).SelectMany(id => Enumerable.Range(1, 41)
+            .Select(i => new SongMetadataChange { SongId = id, FieldName = "Title", Source = "fixture", NewValue = "Observed", CreatedAtUtc = Stamp })));
+        await store.Db.SaveChangesAsync(); store.Db.ChangeTracker.Clear();
+        var page = await Read(store.Db, [1], limit: 100);
+        Assert.True(page.Related.Count is > 0 and < 100); Assert.NotNull(page.NextCursor);
+        var seen = page.Related.Select(r => r.Track.Id).ToList(); var revision = page.ContextRevision;
+        while (page.NextCursor is not null)
+        {
+            page = await Read(store.Db, [1], cursor: page.NextCursor, limit: 100);
+            Assert.Equal(revision, page.ContextRevision); Assert.NotEmpty(page.Related);
+            seen.AddRange(page.Related.Select(r => r.Track.Id));
+        }
+        Assert.True(page.RelatedComplete); Assert.Equal(Enumerable.Range(2, 100), seen);
+    }
+
+    [PostgresTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnOversizedRequiredOrIndividualRelatedTrackRemainsAnExplicitRefusal(bool blocking)
+    {
+        await using var store = await Store.CreateAsync();
+        store.Db.AddRange(Song(1), Song(2, blocking ? "Program" : "Other program"));
+        store.Db.SongMetadataChanges.AddRange(Enumerable.Range(1, 700).Select(i => new SongMetadataChange
+        { SongId = 2, FieldName = "Title", Source = "fixture", NewValue = new string('x', 4096), CreatedAtUtc = Stamp }));
+        await store.Db.SaveChangesAsync();
+        var response = await AlbumAuditEndpoints.Context(new([1], Limit: 100), store.Db, User, Files, default);
+        Assert.Equal(413, Assert.IsAssignableFrom<IStatusCodeHttpResult>(response).StatusCode);
+        Assert.Equal("evidence_too_large", Value<AlbumReviewError>(response).Code);
+        Assert.Equal(2, await store.Db.Songs.CountAsync()); Assert.Empty(await store.Db.ReviewPlans.ToListAsync());
+    }
+
     [PostgresTheory]
     [InlineData(false)]
     [InlineData(true)]
