@@ -127,12 +127,15 @@ public sealed class Mp3TagCompatibilityTests : IDisposable
     }
 
     [AudioToolsTheory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task PartialFinalMpegFrame_RetainsEncodedPacketsAndDecodedPcm(bool legacyTag)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task PartialFinalMpegFrame_RetainsEncodedPacketsAndDecodedPcm(bool legacyTag, bool existingV1)
     {
+        byte[] v1 = existingV1 ? [.. "TAG"u8, .. new byte[125]] : [];
         var source = Create("audio-source", legacyTag ? LegacyTag(LegacyFrame("CM1", [0, .. "Bon"u8])) : [],
-            AudioWithPartialFinalFrame());
+            [.. AudioWithPartialFinalFrame(), .. v1]);
         var candidate = Path.Combine(root, "audio-candidate.mp3");
         File.Copy(source, candidate);
         var song = ReviewedSong();

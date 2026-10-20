@@ -180,7 +180,7 @@ The private delivery report pins the final source SHA and exported patch.
 The tag writer does not introduce an ID3v1 block when the source did not have
 one. Existing ID3v1 tags remain supported. This matters when a partial final MPEG
 frame makes a newly appended tag appear inside ffmpeg's last encoded packet.
-Encoded-payload and full decoded-PCM checks remain mandatory and unchanged.
+Encoded-payload and full decoded-PCM checks remain mandatory.
 
 ID3v2.4 is selected per tag for native multi-value fields. Unmapped three-byte
 ID3v2.2 frames are preserved as valid PRIV frames, with their complete rendered
@@ -197,3 +197,25 @@ Snapshot failures remain strict. Failure-only structured diagnostics identify
 the check, before/after sizes and UTC timestamp ticks, and whether content changed;
 they omit paths and hashes. Public failure codes, receipts and audio-cache policy
 are unchanged. A later stable read does not explain an earlier fresh-copy failure.
+
+
+### MP3 boundary-tag verification
+
+For a single MP3 audio stream in an `.mp3` file, the encoded payload proof hashes
+all file bytes outside recognized leading ID3v2.2/2.3/2.4 tags and the exact
+128-byte trailing ID3v1 block. This avoids treating a changed ID3v1 tag as changed
+audio when ffmpeg includes it in a partial final MPEG packet. The ID3v2.4 footer
+is validated against its header; invalid versions, reserved flags, impossible
+sizes and ambiguous boundaries fail verification. Unclassified leading bytes,
+interior markers and unknown trailers remain included in the hash.
+
+Strict tool-error handling, complete PCM decoding, stream-layout comparison and
+source/candidate stability checks still run. Other codecs and multiple audio
+streams retain their existing encoded-stream verification. No audio is repaired,
+transcoded or omitted. The `review-audio-v2-id3-boundaries` proof version prevents
+reuse of earlier algorithm proofs while preserving their historical receipts.
+Existing retained copy jobs can be retried without replaying metadata approval.
+
+The boundary layout follows the [ID3v2.4 structure specification](https://id3.org/id3v2.4.0-structure).
+Regression coverage includes real retagged partial-frame MP3s with existing
+ID3v1 tags, changed valid audio, malformed boundaries and old proof-cache entries.

@@ -50,7 +50,7 @@ internal interface IReviewAudioCommandRunner
 internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runner, IReviewAudioProofStore? store = null,
     ReviewAudioMetrics? metrics = null, Action<ReviewAudioSnapshotObservation>? snapshotObserver = null)
 {
-    internal const string CodeVersion = "review-audio-v1";
+    internal const string CodeVersion = "review-audio-v2-id3-boundaries";
     private const string EmptySha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
     internal async Task<ReviewAudioResult> VerifyAsync(string source, string candidate, CancellationToken ct = default)
@@ -115,6 +115,10 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         var encoded = await runner.RunAsync(false, [.. common, "-c:a", "copy", "-f", "streamhash", "-hash", "sha256", "-"], ct);
         CheckCommand(encoded);
         var encodedHash = ReadHashes(encoded.Output, streams.Count);
+        // Keep the strict demux check above, but exclude only physical boundary ID3 tags
+        // for a single MP3 stream. Interior markers and unrecognized trailers stay hashed.
+        if (streams is [{ Codec: "mp3" }] && Path.GetExtension(path).Equals(".mp3", StringComparison.OrdinalIgnoreCase))
+            encodedHash = await ReviewMp3Payload.HashAsync(path, ct);
         // Decode the ENTIRE file, with no resampling/channel folding or normalization.
         // This catches invalid/truncated frames even when the demuxed payload can be hashed.
         if (metrics is not null) metrics.DecodeAttempts++;

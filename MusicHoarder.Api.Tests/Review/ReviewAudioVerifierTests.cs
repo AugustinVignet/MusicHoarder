@@ -63,6 +63,40 @@ public sealed class ReviewAudioVerifierTests : IDisposable
     }
 
     [AudioToolsTheory]
+    [InlineData("mp3", "libmp3lame")]
+    public async Task ActualDifferentValidAudio_IsStillRefused(string extension, string codec)
+    {
+        var runner = new ReviewAudioCommandRunner(AudioTools.Ffmpeg!);
+        var source = Path.Combine(root, $"source.{extension}");
+        var candidate = Path.Combine(root, $"different.{extension}");
+        foreach (var (path, frequency) in new[] { (source, 440), (candidate, 880) })
+        {
+            var generated = await runner.ExecuteAsync(false,
+                ["-nostdin", "-v", "error", "-f", "lavfi", "-i", $"sine=frequency={frequency}:sample_rate=44100",
+                    "-t", "0.2", "-c:a", codec, path], default);
+            Assert.Equal(0, generated.ExitCode);
+        }
+        var result = await new ReviewAudioVerifier(runner).VerifyAsync(source, candidate);
+        Assert.False(result.Verified); Assert.Equal("encoded_audio_changed", result.FailureCode);
+        Assert.NotNull(result.Source); Assert.NotNull(result.Candidate);
+        Assert.NotEqual(result.Source.DecodedAudioSha256, result.Candidate.DecodedAudioSha256);
+    }
+
+    [Fact]
+    public async Task PreviousAlgorithmProof_IsRetainedButNeverReused()
+    {
+        var source = await Input("source", [1, 2, 3]); var copy = await Input("candidate", [4, 5, 6]);
+        var runner = new FakeRunner(); var store = new ProofStore();
+        var first = await new ReviewAudioVerifier(runner).VerifyAsync(source, copy);
+        var old = first.Source! with { Version = first.Source.Version.Replace(ReviewAudioVerifier.CodeVersion, "review-audio-v1") };
+        store.Proofs.Add(old);
+        var current = await new ReviewAudioVerifier(runner, store).VerifyAsync(source, copy);
+        Assert.True(current.Verified); Assert.False(current.SourceCacheHit);
+        Assert.Contains(old, store.Proofs);
+        Assert.StartsWith(ReviewAudioVerifier.CodeVersion + ":", current.Source!.Version);
+    }
+
+    [AudioToolsTheory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task ActualMissingAudioOrMetadataOnly_IsNeverCertified(bool empty)
