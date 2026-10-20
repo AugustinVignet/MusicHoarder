@@ -135,7 +135,7 @@ public sealed class Mp3TagCompatibilityTests : IDisposable
     {
         byte[] v1 = existingV1 ? [.. "TAG"u8, .. new byte[125]] : [];
         var source = Create("audio-source", legacyTag ? LegacyTag(LegacyFrame("CM1", [0, .. "Bon"u8])) : [],
-            [.. AudioWithPartialFinalFrame(), .. v1]);
+            [.. AudioWithPartialFinalFrame(existingV1 ? 224 : 128), .. v1]);
         var candidate = Path.Combine(root, "audio-candidate.mp3");
         File.Copy(source, candidate);
         var song = ReviewedSong();
@@ -162,6 +162,18 @@ public sealed class Mp3TagCompatibilityTests : IDisposable
         Assert.Equal(song.SyncedLyrics, id3.Lyrics);
     }
 
+    [AudioToolsTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TrulyUndecodablePartialFrameWithId3v1_IsStillRefused(bool legacyTag)
+    {
+        var path = Create("invalid-partial-v1", legacyTag ? LegacyTag(LegacyFrame("TT2", [0, .. "Old title"u8])) : [],
+            [.. AudioWithPartialFinalFrame(), .. "TAG"u8, .. new byte[125]]);
+        var result = await new ReviewAudioVerifier(new ReviewAudioCommandRunner(AudioTools.Ffmpeg!)).VerifyAsync(path, path);
+        Assert.False(result.Verified); Assert.Equal("source", result.FailedStage);
+        Assert.Equal("audio_errors_reported", result.FailureCode);
+    }
+
     private string Create(string name, byte[] tag, byte[] audio)
     {
         var path = Path.Combine(root, name + ".mp3");
@@ -169,14 +181,15 @@ public sealed class Mp3TagCompatibilityTests : IDisposable
         return path;
     }
 
-    private static byte[] AudioWithPartialFinalFrame()
+    private static byte[] AudioWithPartialFinalFrame(int finalBytes = 128)
     {
         var fixture = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "silence.mp3"));
         var audio = fixture[LeadingTagLength(fixture)..];
         Assert.True(audio.AsSpan(0, 2).SequenceEqual(new byte[] { 0xff, 0xfb }));
-        // Keep all original silent frames, 27 leading unclassified bytes, and 128 bytes of
-        // another MPEG frame. Adding a trailing TAG here changes ffmpeg's last encoded packet.
-        return [.. new byte[27], .. audio, .. audio[..128]];
+        // Keep all original silent frames, 27 leading unclassified bytes, and a partial copy
+        // of another MPEG frame. Existing v1 cases use 224 bytes: 128 plus v1 is
+        // genuinely undecodable, whereas 224 plus v1 reproduces the clean PCM case.
+        return [.. new byte[27], .. audio, .. audio[..finalBytes]];
     }
 
     private static int LeadingTagLength(byte[] bytes) => bytes.AsSpan(0, 3).SequenceEqual("ID3"u8)
