@@ -22,7 +22,8 @@ internal sealed class ReviewCopyProcessor(MusicHoarderDbContext db, IFileSystem 
     ILibraryTagWriter writer, IDestinationPathResolver resolver, IReviewAudioCommandRunner runner,
     IReviewCopyCheckpoints? checkpoints = null, ILogger<ReviewCopyProcessor>? logger = null)
 {
-    private readonly ReviewAudioVerifier audio = new(runner, new ReviewAudioProofStore(db));
+    // The candidate was just written to the destination volume: let its write time settle first.
+    private readonly ReviewAudioVerifier audio = new(runner, new ReviewAudioProofStore(db), candidateSettle: ReviewAudioSettle.FreshCopy);
 
     internal async Task<bool> RunNextAsync(CancellationToken ct)
     {

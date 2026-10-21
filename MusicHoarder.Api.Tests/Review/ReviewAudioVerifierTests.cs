@@ -241,6 +241,62 @@ public sealed class ReviewAudioVerifierTests : IDisposable
             difference.BeforeModifiedUtcTicks, difference.AfterModifiedUtcTicks, false), result.SnapshotFailure);
     }
 
+    private static readonly ReviewAudioSettle FastSettle = new(TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(20), TimeSpan.FromSeconds(3));
+
+    [Fact]
+    public async Task CandidateWriteTimeSettlingAfterTheWrite_IsAwaitedBeforeTheStrictGuard()
+    {
+        var source = await Input("source", [1, 2, 3]); var copy = await Input("candidate", [4, 5, 6]);
+        var stamp = File.GetLastWriteTimeUtc(copy);
+        // A network mount publishes the server write time shortly after the writer closed the file.
+        // Scheduled from the source decode (the first decode), so it lands while the candidate settles.
+        Task late = Task.CompletedTask; var scheduled = 0;
+        var runner = new FakeRunner { OnDecode = () => { if (Interlocked.Exchange(ref scheduled, 1) == 0)
+            late = Task.Run(async () => { await Task.Delay(100); File.SetLastWriteTimeUtc(copy, stamp.AddSeconds(1.3)); }); } };
+        var observations = new List<ReviewAudioSnapshotObservation>();
+        var result = await new ReviewAudioVerifier(runner, snapshotObserver: observations.Add, candidateSettle: FastSettle).VerifyAsync(source, copy);
+        await late;
+        Assert.True(result.Verified, result.FailureCode);
+        var settle = Assert.Single(observations, x => x.Check == "candidate_settle");
+        Assert.Equal(settle.BeforeSize, settle.AfterSize);
+        Assert.Equal(stamp.AddSeconds(1.3).Ticks, settle.AfterModifiedUtcTicks);
+        Assert.DoesNotContain(observations, x => x.Path == source && x.Check == "candidate_settle");
+    }
+
+    [Fact]
+    public async Task CandidateTimestampChangeDuringInspection_IsStillRefusedWithSettling()
+    {
+        var source = await Input("source", [1, 2, 3]); var copy = await Input("candidate", [4, 5, 6]);
+        var stamp = File.GetLastWriteTimeUtc(copy);
+        var runner = new FakeRunner { OnCandidateDecode = () => File.SetLastWriteTimeUtc(copy, stamp.AddSeconds(1)) };
+        var result = await new ReviewAudioVerifier(runner, candidateSettle: FastSettle).VerifyAsync(source, copy);
+        Assert.False(result.Verified);
+        Assert.Equal("candidate", result.FailedStage);
+        Assert.Equal("file_changed_during_verification", result.FailureCode);
+        Assert.Equal(false, result.SnapshotFailure?.HashChanged);
+    }
+
+    [Fact]
+    public async Task CandidateThatNeverSettles_WaitsOnlyUntilTheLimitThenTheGuardDecides()
+    {
+        var source = await Input("source", [1, 2, 3]); var copy = await Input("candidate", [4, 5, 6]);
+        var stamp = File.GetLastWriteTimeUtc(copy);
+        using var stop = new CancellationTokenSource();
+        var n = 0;
+        var touching = Task.Run(async () => { while (!stop.IsCancellationRequested) { File.SetLastWriteTimeUtc(copy, stamp.AddSeconds(++n)); await Task.Delay(10); } });
+        var limit = new ReviewAudioSettle(TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(400));
+        var verifier = new ReviewAudioVerifier(new FakeRunner { OnCandidateDecode = () => File.SetLastWriteTimeUtc(copy, stamp.AddSeconds(-1)) }, candidateSettle: limit);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var settled = await verifier.SettleAsync(copy, limit, default);
+        var waited = clock.Elapsed;
+        stop.Cancel(); await touching;
+        Assert.False(settled);
+        Assert.InRange(waited, TimeSpan.FromMilliseconds(350), TimeSpan.FromSeconds(2));
+        var result = await verifier.VerifyAsync(source, copy);
+        Assert.False(result.Verified);
+        Assert.Equal("file_changed_during_verification", result.FailureCode);
+    }
+
     [Theory]
     [InlineData("audio_inspection", true)]
     [InlineData("snapshot_hash_read", null)]

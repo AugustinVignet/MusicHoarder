@@ -19,6 +19,15 @@ internal sealed record ReviewAudioSnapshotObservation(string Path, string Check,
 internal sealed record ReviewAudioSnapshotFailure(string Check, long BeforeSize, long AfterSize,
     long BeforeModifiedUtcTicks, long AfterModifiedUtcTicks, bool? HashChanged);
 
+/// <summary>Waits for a freshly written candidate's size and modification time to stop moving
+/// before its first snapshot. Network mounts can publish the server-side write time about one
+/// attribute-cache period after the writer closed the file; that one-off update must happen
+/// before the guarded inspection, not during it. Content changes are still refused.</summary>
+internal sealed record ReviewAudioSettle(TimeSpan Window, TimeSpan Poll, TimeSpan MaxWait)
+{
+    internal static readonly ReviewAudioSettle FreshCopy = new(TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(15));
+}
+
 internal sealed record ReviewAudioStream(string Codec, int SampleRate, int Channels);
 internal sealed record ReviewAudioProof(string Version, string ContentSha256, long SizeBytes,
     string EncodedAudioSha256, string DecodedAudioSha256, IReadOnlyList<ReviewAudioStream> Streams, DateTime VerifiedAtUtc);
@@ -48,7 +57,8 @@ internal interface IReviewAudioCommandRunner
 /// <summary>Read-only audio fidelity checks, independent of plan B's persistence/HTTP contract.
 /// No process shell, provider, transcoded output file, musical approval or publication.</summary>
 internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runner, IReviewAudioProofStore? store = null,
-    ReviewAudioMetrics? metrics = null, Action<ReviewAudioSnapshotObservation>? snapshotObserver = null)
+    ReviewAudioMetrics? metrics = null, Action<ReviewAudioSnapshotObservation>? snapshotObserver = null,
+    ReviewAudioSettle? candidateSettle = null)
 {
     internal const string CodeVersion = "review-audio-v2-id3-boundaries";
     private const string EmptySha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -74,6 +84,7 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
             stage = "source";
             (left, leftHit) = await InspectAsync(source, key, ct, hash => sourceRead = hash);
             stage = "candidate";
+            if (candidateSettle is not null) await SettleAsync(candidate, candidateSettle, ct);
             var (right, rightHit) = await InspectAsync(candidate, key, ct, hash => candidateRead = hash);
             var failure = !left.Streams.SequenceEqual(right.Streams) ? "stream_layout_changed"
                 : left.EncodedAudioSha256 != right.EncodedAudioSha256 ? "encoded_audio_changed"
@@ -133,6 +144,25 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         var proof = new ReviewAudioProof(version, before.Hash, before.Size, encodedHash, decodedHash, streams, DateTime.UtcNow);
         if (store is not null) await store.SaveAsync(proof, ct);
         return (proof, false);
+    }
+
+    /// <summary>Returns once size and write time were unchanged for the whole window, or after
+    /// MaxWait. Never accepts a change: the strict snapshots that follow still decide.</summary>
+    internal async Task<bool> SettleAsync(string path, ReviewAudioSettle settle, CancellationToken ct)
+    {
+        static (long Size, DateTime Modified) Stat(string p) { var i = new FileInfo(p); return (i.Length, i.LastWriteTimeUtc); }
+        var first = Stat(path); var last = first;
+        var total = Stopwatch.StartNew(); var stable = Stopwatch.StartNew();
+        while (stable.Elapsed < settle.Window)
+        {
+            if (total.Elapsed >= settle.MaxWait) break;
+            await Task.Delay(settle.Poll, ct);
+            var now = Stat(path);
+            if (now != last) { last = now; stable.Restart(); }
+        }
+        if (last != first)
+            snapshotObserver?.Invoke(new(path, "candidate_settle", first.Size, last.Size, first.Modified.Ticks, last.Modified.Ticks, null, null));
+        return stable.Elapsed >= settle.Window;
     }
 
     internal async Task<(string Hash, long Size, DateTime Modified)> SnapshotAsync(string path, CancellationToken ct)
