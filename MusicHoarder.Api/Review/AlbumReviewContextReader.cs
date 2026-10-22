@@ -22,8 +22,12 @@ internal sealed class AlbumReviewReadException(int statusCode, string code, stri
 internal static class AlbumReviewContextReader
 {
     internal const int MaxTracks = 200;
-    internal const int MaxEvidenceRows = 4000;
-    internal const int MaxResponseBytes = 2 * 1024 * 1024;
+    // Defaults bound a packet meant for one reviewer. A deployment whose duplicate graphs are dense
+    // (whole discographies) may raise them explicitly; values below the defaults are ignored.
+    internal static readonly int MaxEvidenceRows = Limit("MH_REVIEW_MAX_EVIDENCE_ROWS", 4000);
+    internal static readonly int MaxResponseBytes = Limit("MH_REVIEW_MAX_RESPONSE_BYTES", 2 * 1024 * 1024);
+    private static int Limit(string name, int fallback) =>
+        int.TryParse(Environment.GetEnvironmentVariable(name), out var value) && value > fallback ? value : fallback;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly JsonSerializerOptions ProviderJson = new() { PropertyNameCaseInsensitive = true };
 

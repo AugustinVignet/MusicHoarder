@@ -114,7 +114,7 @@ internal static class AlbumAuditReader
             rows.Count > limit ? Encode(new(Version, binding, inventory.Revision, rows[limit - 1].Key, 0), codec) : null,
             new(inventory.Tracks, inventory.Groups, "Every active owned track in exactly one unmerged primary unit; deleted/shared rows excluded."));
         if (JsonSerializer.SerializeToUtf8Bytes(result, Json).Length > AlbumReviewContextReader.MaxResponseBytes)
-            throw new AlbumReviewReadException(413, "evidence_too_large", "Inventory page exceeds 2 MiB; reduce limit. No partial page returned.");
+            throw new AlbumReviewReadException(413, "evidence_too_large", "Inventory page exceeds the response byte budget; reduce limit. No partial page returned.");
         return result;
     }
 
@@ -203,7 +203,7 @@ internal static class AlbumAuditReader
         var links = await db.SongDuplicateLinks.AsNoTracking().Where(l => l.OwnerUserId == owner &&
             (evidenceIds.Contains(l.SongIdLow) || evidenceIds.Contains(l.SongIdHigh)) &&
             owned.Any(s => s.Id == l.SongIdLow) && owned.Any(s => s.Id == l.SongIdHigh)).OrderBy(l => l.Id).Take(4001).ToListAsync(ct);
-        if (links.Count > 4000) throw TooLarge();
+        if (links.Count > AlbumReviewContextReader.MaxEvidenceRows) throw TooLarge();
         var evidence = await EvidenceAsync(db, files, owner, evidenceSongs, reasonMap, ids,
             selected.Values.Select(s => AlbumReviewContextReader.Parent(s.SourcePath)!).Distinct().Order(StringComparer.Ordinal).ToArray(), links, ct, "boundedAlbumAuditV1");
         var references = evidence.Programs.Select(p => new AlbumAuditCachedReference(new("canonicalAlbum", p.Id, Hash(p with { RelatedSongIds = [] })), p)).ToArray();
@@ -358,5 +358,5 @@ internal static class AlbumAuditReader
     private static void CheckRevision(Cursor? cursor, string revision, string code)
     { if (cursor is not null && cursor.Revision != revision) throw new AlbumReviewReadException(409, code, "The dependency snapshot changed; restart pagination."); }
     private static AlbumReviewReadException Bad(string message) => new(400, "invalid_selection", message);
-    private static AlbumReviewReadException TooLarge() => new(413, "evidence_too_large", "Evidence exceeds 4000 rows or 2 MiB; select a narrower explicit program. No partial evidence returned.", 4000);
+    private static AlbumReviewReadException TooLarge() => new(413, "evidence_too_large", "Evidence exceeds the row or byte budget; select a narrower explicit program. No partial evidence returned.", AlbumReviewContextReader.MaxEvidenceRows);
 }
