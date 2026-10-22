@@ -150,7 +150,8 @@ public sealed class ReviewAudioVerifierTests : IDisposable
     [Theory]
     [InlineData("encoded-exit", "audio_tool_failed")]
     [InlineData("decoded-exit", "audio_tool_failed")]
-    [InlineData("stderr", "audio_errors_reported")]
+    [InlineData("flood", "audio_errors_reported")]
+    [InlineData("tolerant-exit", "audio_tool_failed")]
     [InlineData("json", "invalid_tool_output")]
     [InlineData("hash", "invalid_audio_hash_output")]
     [InlineData("zero-hash", "invalid_audio_hash_output")]
@@ -175,6 +176,57 @@ public sealed class ReviewAudioVerifierTests : IDisposable
         var source = await Input("source", [1, 2, 3]); var copy = await Input("candidate", [4, 5, 6]);
         var result = await new ReviewAudioVerifier(new FakeRunner { Scenario = scenario }).VerifyAsync(source, copy);
         Assert.False(result.Verified); Assert.Equal("comparison", result.FailedStage); Assert.Equal(expected, result.FailureCode);
+    }
+
+    [Fact]
+    public async Task SourceWithDamagedFrame_IsAcceptedOnlyWhenTheCopyReproducesTheSameAudioAndErrors()
+    {
+        var source = await Input("source", [1, 2, 3]); var copy = await Input("candidate", [4, 5, 6]);
+        var store = new ProofStore();
+        var result = await new ReviewAudioVerifier(new FakeRunner { Scenario = "damaged" }, store).VerifyAsync(source, copy);
+        Assert.True(result.Verified, $"{result.FailedStage}:{result.FailureCode}");
+        Assert.NotNull(result.Source!.DecodeErrorsSha256);
+        Assert.Equal(result.Source.DecodeErrorsSha256, result.Candidate!.DecodeErrorsSha256);
+        Assert.Equal(2, store.Proofs.Count);
+        var differs = await new ReviewAudioVerifier(new FakeRunner { Scenario = "damaged-candidate-differs" }).VerifyAsync(source, copy);
+        Assert.False(differs.Verified); Assert.Equal("comparison", differs.FailedStage); Assert.Equal("decode_errors_changed", differs.FailureCode);
+        var cleanCopy = await new ReviewAudioVerifier(new FakeRunner { Scenario = "damaged-source-only" }).VerifyAsync(source, copy);
+        Assert.False(cleanCopy.Verified); Assert.Equal("decode_errors_changed", cleanCopy.FailureCode);
+    }
+
+    [Fact]
+    public void Diagnostics_IgnoreProcessAddressesOnly()
+    {
+        var a = ReviewAudioVerifier.NormalizeDiagnostics("[mp3float @ 0x60c7ed7e5d80] Header missing\n[aist#0:0/mp3 @ 0x60c7ed826ac0] Error  processing packet\n");
+        var b = ReviewAudioVerifier.NormalizeDiagnostics("[mp3float @ 0x5d58b34a0b40] Header missing\n[aist#0:0/mp3 @ 0x5d58b34a0980] Error processing packet");
+        Assert.Equal(a, b); Assert.Equal(2, a.Count);
+        Assert.NotEqual(a, ReviewAudioVerifier.NormalizeDiagnostics("[mp3float @ 0x1] Invalid data found"));
+    }
+
+    [AudioToolsFact]
+    public async Task ActualMp3WithADamagedFrame_RetaggedCopyIsVerified_AndFurtherDamageIsRefused()
+    {
+        var source = Path.Combine(root, "damaged.mp3"); var candidate = Path.Combine(root, "candidate.mp3");
+        var runner = new ReviewAudioCommandRunner(AudioTools.Ffmpeg!);
+        var generated = await runner.ExecuteAsync(false,
+            ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "20", "-c:a", "libmp3lame", "-b:a", "128k", source], default);
+        Assert.Equal(0, generated.ExitCode);
+        var bytes = await File.ReadAllBytesAsync(source);
+        Array.Fill(bytes, (byte)0, bytes.Length / 2, 600);
+        await File.WriteAllBytesAsync(source, bytes);
+        var strict = await runner.ExecuteAsync(false, ["-nostdin", "-hide_banner", "-v", "error", "-xerror", "-err_detect", "explode", "-i", source, "-f", "null", "-"], default);
+        Assert.True(strict.ExitCode != 0 || !string.IsNullOrWhiteSpace(strict.Errors), "fixture must trip the strict decoder");
+        File.Copy(source, candidate);
+        var song = ReviewCopyTagRetagTests.Song();
+        await new TagLibLibraryTagWriter().WriteTagsAsync(candidate, song, AlbumIdentity.FromSong(song));
+        var result = await new ReviewAudioVerifier(runner).VerifyAsync(source, candidate);
+        Assert.True(result.Verified, $"{result.FailedStage}:{result.FailureCode}");
+        Assert.NotNull(result.Source!.DecodeErrorsSha256);
+        var worse = await File.ReadAllBytesAsync(candidate);
+        Array.Fill(worse, (byte)0, worse.Length / 4, 600);
+        await File.WriteAllBytesAsync(candidate, worse);
+        var refused = await new ReviewAudioVerifier(runner).VerifyAsync(source, candidate);
+        Assert.False(refused.Verified);
     }
 
     [Fact]
@@ -391,6 +443,17 @@ public sealed class ReviewAudioVerifierTests : IDisposable
             var decoding = arguments.Contains("pcm_s32le");
             if (decoding) OnDecode?.Invoke();
             if (decoding && arguments.Any(a => a.EndsWith("candidate"))) OnCandidateDecode?.Invoke();
+            var strict = arguments.Contains("-xerror");
+            var candidateSide = arguments.Any(a => a.EndsWith("candidate"));
+            if (Scenario is "damaged" or "damaged-candidate-differs" or "damaged-source-only" or "flood" or "tolerant-exit")
+            {
+                var damaged = !(Scenario == "damaged-source-only" && candidateSide);
+                if (!damaged) return Task.FromResult(new AudioCommandResult(0, $"0,a,SHA256={new string('a', 64)}\n", ""));
+                var line = Scenario == "damaged-candidate-differs" && candidateSide ? "[mp3float @ 0xbeef] Invalid data found" : $"[mp3float @ 0x{(candidateSide ? "beef" : "cafe")}] Header missing";
+                var errors = Scenario == "flood" ? string.Join('\n', Enumerable.Repeat(line, 65)) : line;
+                if (strict) return Task.FromResult(new AudioCommandResult(1, "", errors));
+                return Task.FromResult(new AudioCommandResult(Scenario == "tolerant-exit" ? 1 : 0, $"0,a,SHA256={new string('a', 64)}\n", errors));
+            }
             var hash = new string('a', 64);
             if (Scenario == "hash") hash = "bad-hash";
             if (Scenario == "zero-hash") hash = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855";
@@ -406,6 +469,10 @@ public sealed class ReviewAudioVerifierTests : IDisposable
 public sealed class AudioToolsTheoryAttribute : TheoryAttribute
 {
     public AudioToolsTheoryAttribute() { if (AudioTools.Ffmpeg is null || AudioTools.Ffprobe is null) Skip = "Install ffmpeg/ffprobe for real synthetic-audio verification."; }
+}
+public sealed class AudioToolsFactAttribute : FactAttribute
+{
+    public AudioToolsFactAttribute() { if (AudioTools.Ffmpeg is null || AudioTools.Ffprobe is null) Skip = "Install ffmpeg/ffprobe for real synthetic-audio verification."; }
 }
 public sealed class UnixFactAttribute : FactAttribute
 {

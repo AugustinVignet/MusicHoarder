@@ -29,8 +29,12 @@ internal sealed record ReviewAudioSettle(TimeSpan Window, TimeSpan Poll, TimeSpa
 }
 
 internal sealed record ReviewAudioStream(string Codec, int SampleRate, int Channels);
+/// <summary>DecodeErrorsSha256 is null for a file that decodes cleanly under the strict check.
+/// Otherwise it fingerprints the bounded, address-normalized diagnostics of a tolerant decode:
+/// a copy is then only accepted when it reproduces exactly the same audio and the same errors.</summary>
 internal sealed record ReviewAudioProof(string Version, string ContentSha256, long SizeBytes,
-    string EncodedAudioSha256, string DecodedAudioSha256, IReadOnlyList<ReviewAudioStream> Streams, DateTime VerifiedAtUtc);
+    string EncodedAudioSha256, string DecodedAudioSha256, IReadOnlyList<ReviewAudioStream> Streams, DateTime VerifiedAtUtc,
+    string? DecodeErrorsSha256 = null);
 internal sealed record ReviewAudioResult(bool Verified, string? FailedStage, string? FailureCode,
     ReviewAudioProof? Source, ReviewAudioProof? Candidate, bool SourceCacheHit, bool CandidateCacheHit)
 {
@@ -88,7 +92,8 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
             var (right, rightHit) = await InspectAsync(candidate, key, ct, hash => candidateRead = hash);
             var failure = !left.Streams.SequenceEqual(right.Streams) ? "stream_layout_changed"
                 : left.EncodedAudioSha256 != right.EncodedAudioSha256 ? "encoded_audio_changed"
-                : left.DecodedAudioSha256 != right.DecodedAudioSha256 ? "decoded_audio_changed" : null;
+                : left.DecodedAudioSha256 != right.DecodedAudioSha256 ? "decoded_audio_changed"
+                : left.DecodeErrorsSha256 != right.DecodeErrorsSha256 ? "decode_errors_changed" : null;
             if (failure is null)
             {
                 stage = "comparison";
@@ -123,8 +128,9 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         CheckCommand(probe);
         var streams = ReadStreams(probe.Output);
         var common = new[] { "-nostdin", "-hide_banner", "-v", "error", "-xerror", "-err_detect", "explode", "-i", path, "-map", "0:a" };
-        var encoded = await runner.RunAsync(false, [.. common, "-c:a", "copy", "-f", "streamhash", "-hash", "sha256", "-"], ct);
-        CheckCommand(encoded);
+        var tolerant = new[] { "-nostdin", "-hide_banner", "-v", "error", "-i", path, "-map", "0:a" };
+        var diagnostics = new List<string>();
+        var encoded = await RunCheckedAsync(common, tolerant, ["-c:a", "copy", "-f", "streamhash", "-hash", "sha256", "-"], diagnostics, ct);
         var encodedHash = ReadHashes(encoded.Output, streams.Count);
         // Keep the strict demux check above, but exclude only physical boundary ID3 tags
         // for a single MP3 stream. Interior markers and unrecognized trailers stay hashed.
@@ -133,15 +139,15 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         // Decode the ENTIRE file, with no resampling/channel folding or normalization.
         // This catches invalid/truncated frames even when the demuxed payload can be hashed.
         if (metrics is not null) metrics.DecodeAttempts++;
-        var decoded = await runner.RunAsync(false, [.. common, "-c:a", "pcm_s32le", "-f", "streamhash", "-hash", "sha256", "-"], ct);
-        CheckCommand(decoded);
+        var decoded = await RunCheckedAsync(common, tolerant, ["-c:a", "pcm_s32le", "-f", "streamhash", "-hash", "sha256", "-"], diagnostics, ct);
         var decodedHash = ReadHashes(decoded.Output, streams.Count);
         var after = await SnapshotAsync(path, ct);
         snapshotObserver?.Invoke(new(path, "audio_inspection", before.Size, after.Size,
             before.Modified.Ticks, after.Modified.Ticks, before.Hash, after.Hash));
         if (before != after) throw new AudioCheckException("file_changed_during_verification",
             new("audio_inspection", before.Size, after.Size, before.Modified.Ticks, after.Modified.Ticks, before.Hash != after.Hash));
-        var proof = new ReviewAudioProof(version, before.Hash, before.Size, encodedHash, decodedHash, streams, DateTime.UtcNow);
+        var proof = new ReviewAudioProof(version, before.Hash, before.Size, encodedHash, decodedHash, streams, DateTime.UtcNow,
+            diagnostics.Count == 0 ? null : Hash(string.Join('\n', diagnostics)));
         if (store is not null) await store.SaveAsync(proof, ct);
         return (proof, false);
     }
@@ -188,6 +194,41 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
             new("snapshot_hash_read", length, info.Length, modified.Ticks, info.LastWriteTimeUtc.Ticks, null));
         return (hash, length, modified);
     }
+
+    internal const int MaxToleratedDecodeErrorLines = 64;
+
+    /// <summary>Runs the strict check. Only when the file itself reports decode errors (a damaged
+    /// frame in an otherwise playable source) does it repeat the step without -xerror/explode and
+    /// keep the normalized diagnostics. Tool failures, timeouts and truncated output stay refusals,
+    /// as does a tolerant run that fails or reports more than a bounded number of error lines.</summary>
+    private async Task<AudioCommandResult> RunCheckedAsync(string[] strict, string[] tolerant, string[] output,
+        List<string> diagnostics, CancellationToken ct)
+    {
+        var result = await runner.RunAsync(false, [.. strict, .. output], ct);
+        if (result.Failure is not null || result.Truncated || (result.ExitCode == 0 && string.IsNullOrWhiteSpace(result.Errors)))
+        {
+            CheckCommand(result);
+            return result;
+        }
+        var relaxed = await runner.RunAsync(false, [.. tolerant, .. output], ct);
+        if (relaxed.Failure is not null) throw new AudioCheckException(relaxed.Failure);
+        if (relaxed.Truncated) throw new AudioCheckException("tool_output_limit");
+        if (relaxed.ExitCode != 0) throw new AudioCheckException("audio_tool_failed");
+        var lines = NormalizeDiagnostics(string.IsNullOrWhiteSpace(relaxed.Errors) ? result.Errors : relaxed.Errors);
+        if (lines.Count == 0 || lines.Count > MaxToleratedDecodeErrorLines) throw new AudioCheckException("audio_errors_reported");
+        diagnostics.AddRange(lines);
+        return relaxed;
+    }
+
+    /// <summary>Removes per-process object addresses so identical damage yields identical text.</summary>
+    internal static List<string> NormalizeDiagnostics(string errors) =>
+        errors.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(line => ProcessAddress().Replace(line, "@"))
+            .Select(line => string.Join(' ', line.Split(' ', StringSplitOptions.RemoveEmptyEntries)))
+            .Where(line => line.Length > 0).ToList();
+
+    [GeneratedRegex(@"@ 0x[0-9a-fA-F]+")]
+    private static partial Regex ProcessAddress();
 
     private static IReadOnlyList<ReviewAudioStream> ReadStreams(string json)
     {
