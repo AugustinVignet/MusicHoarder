@@ -202,7 +202,7 @@ internal static class AlbumAuditReader
         var reasonMap = evidenceSongs.Keys.ToDictionary(i => i, i => new SortedSet<string>(ids.Contains(i) ? ["selected"] : blockers.Single(b => b.Id == i).Reasons, StringComparer.Ordinal));
         var links = await db.SongDuplicateLinks.AsNoTracking().Where(l => l.OwnerUserId == owner &&
             (evidenceIds.Contains(l.SongIdLow) || evidenceIds.Contains(l.SongIdHigh)) &&
-            owned.Any(s => s.Id == l.SongIdLow) && owned.Any(s => s.Id == l.SongIdHigh)).OrderBy(l => l.Id).Take(4001).ToListAsync(ct);
+            owned.Any(s => s.Id == l.SongIdLow) && owned.Any(s => s.Id == l.SongIdHigh)).OrderBy(l => l.Id).Take(AlbumReviewContextReader.MaxEvidenceRows + 1).ToListAsync(ct);
         if (links.Count > AlbumReviewContextReader.MaxEvidenceRows) throw TooLarge();
         var evidence = await EvidenceAsync(db, files, owner, evidenceSongs, reasonMap, ids,
             selected.Values.Select(s => AlbumReviewContextReader.Parent(s.SourcePath)!).Distinct().Order(StringComparer.Ordinal).ToArray(), links, ct, "boundedAlbumAuditV1");
