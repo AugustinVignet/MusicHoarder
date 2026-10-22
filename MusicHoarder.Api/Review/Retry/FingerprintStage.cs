@@ -24,6 +24,10 @@ internal static class PipelineStageJournal
         current.Targeted |= jobId.HasValue;
         // Identification, provider success and a restart never erase an observed source warning.
         if (sourceWarning) { current.SourceWarningCode = code; current.SourceWarningInputSha256 = hash; }
+        // A warning describes the bytes it was observed on. A later success on different source bytes
+        // (the file was replaced or repaired) supersedes it; the attempt history still keeps it.
+        else if (state == "success" && hash is not null && current.SourceWarningInputSha256 is not null && current.SourceWarningInputSha256 != hash)
+        { current.SourceWarningCode = null; current.SourceWarningInputSha256 = null; }
         db.PipelineStageAttempts.Add(new() { Id = Guid.NewGuid(), SongId = song.Id, OwnerUserId = song.OwnerUserId,
             JobId = jobId, Stage = stage, State = state, Code = code, InputSha256 = hash, CandidateJson = candidate,
             ExitCode = exitCode, AttemptedAtUtc = current.UpdatedAtUtc, NextRetryAfterUtc = retryAfter });

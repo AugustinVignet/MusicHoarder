@@ -576,6 +576,7 @@ public sealed class TargetedRetryTests : IDisposable
     {
         Assert.NotNull(FpcalcTools.Path);
         await using var store = await Store.CreateAsync(); var song = (await AddSongs(store.Db, 1)).Single();
+        var intact = await File.ReadAllBytesAsync(song.SourcePath);
         using (var truncate = File.OpenWrite(song.SourcePath)) truncate.SetLength(truncate.Length - 100);
         var native = new FpcalcService(Microsoft.Extensions.Options.Options.Create(new MusicEnricherOptions { FpcalcPath = FpcalcTools.Path! }), NullLogger<FpcalcService>.Instance);
         var provider = new FakeEnrichment();
@@ -589,6 +590,18 @@ public sealed class TargetedRetryTests : IDisposable
         Assert.StartsWith("source_audio:", warning.SourceWarningCode); Assert.NotNull(warning.CandidateJson);
         var attempt = Assert.Single(await TargetedRetryService.AttemptsAsync(resumed, Owner, song.Id, null, 0, 10, default));
         Assert.Equal(3, attempt.ExitCode);
+        // The same bytes keep the warning; repaired bytes with a fresh success supersede it, history stays.
+        await TargetedRetryService.CreateAsync(resumed, files, Owner, Request([song.Id]), default);
+        await Processor(resumed, native).RunNextAsync(default);
+        Assert.NotNull((await TargetedRetryService.StagesAsync(resumed, Owner, song.Id, default)).Single().SourceWarningCode);
+        await File.WriteAllBytesAsync(song.SourcePath, intact);
+        await TargetedRetryService.CreateAsync(resumed, files, Owner, Request([song.Id]), default);
+        await Processor(resumed, native).RunNextAsync(default);
+        var repaired = (await TargetedRetryService.StagesAsync(resumed, Owner, song.Id, default)).Single();
+        Assert.Equal("success", repaired.State); Assert.Null(repaired.SourceWarningCode); Assert.Null(repaired.SourceWarningInputSha256);
+        Assert.Equal(3, (await TargetedRetryService.AttemptsAsync(resumed, Owner, song.Id, null, 0, 10, default)).Count);
+        await TargetedRetryService.ResumeAutomationAsync(resumed, files, Owner, new([song.Id], true, true, true), default);
+        Assert.False((await resumed.Songs.AsNoTracking().SingleAsync()).AutomationHeld);
     }
 
     [PostgresFact]
