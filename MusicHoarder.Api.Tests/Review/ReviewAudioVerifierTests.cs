@@ -179,7 +179,7 @@ public sealed class ReviewAudioVerifierTests : IDisposable
     }
 
     [Fact]
-    public async Task SourceWithDamagedFrame_IsAcceptedOnlyWhenTheCopyReproducesTheSameAudioAndErrors()
+    public async Task SourceWithDamagedFrame_IsAcceptedOnlyWhenTheCopyReproducesTheSameAudioAndDamage()
     {
         var source = await Input("source", [1, 2, 3]); var copy = await Input("candidate", [4, 5, 6]);
         var store = new ProofStore();
@@ -188,8 +188,10 @@ public sealed class ReviewAudioVerifierTests : IDisposable
         Assert.NotNull(result.Source!.DecodeErrorsSha256);
         Assert.Equal(result.Source.DecodeErrorsSha256, result.Candidate!.DecodeErrorsSha256);
         Assert.Equal(2, store.Proofs.Count);
-        var differs = await new ReviewAudioVerifier(new FakeRunner { Scenario = "damaged-candidate-differs" }).VerifyAsync(source, copy);
-        Assert.False(differs.Verified); Assert.Equal("comparison", differs.FailedStage); Assert.Equal("decode_errors_changed", differs.FailureCode);
+        // A retag can change how the parser reports the same damage; identical PCM still decides.
+        var reworded = await new ReviewAudioVerifier(new FakeRunner { Scenario = "damaged-candidate-differs" }).VerifyAsync(source, copy);
+        Assert.True(reworded.Verified, $"{reworded.FailedStage}:{reworded.FailureCode}");
+        Assert.NotEqual(reworded.Source!.DecodeErrorsSha256, reworded.Candidate!.DecodeErrorsSha256);
         var cleanCopy = await new ReviewAudioVerifier(new FakeRunner { Scenario = "damaged-source-only" }).VerifyAsync(source, copy);
         Assert.False(cleanCopy.Verified); Assert.Equal("decode_errors_changed", cleanCopy.FailureCode);
     }

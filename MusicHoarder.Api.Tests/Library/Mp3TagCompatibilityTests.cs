@@ -173,7 +173,7 @@ public sealed class Mp3TagCompatibilityTests : IDisposable
         var same = await verifier.VerifyAsync(path, path);
         Assert.True(same.Verified, $"{same.FailedStage}:{same.FailureCode}");
         Assert.NotNull(same.Source!.DecodeErrorsSha256);
-        // A candidate whose damaged tail differs is never treated as the same audio.
+        // A candidate whose tail was repaired decodes differently and is refused.
         var repaired = Create("repaired-partial-v1", tag, [.. AudioWithPartialFinalFrame(224), .. "TAG"u8, .. new byte[125]]);
         var differs = await verifier.VerifyAsync(path, repaired);
         Assert.False(differs.Verified); Assert.Equal("comparison", differs.FailedStage);

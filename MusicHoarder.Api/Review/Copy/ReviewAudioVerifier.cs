@@ -30,8 +30,10 @@ internal sealed record ReviewAudioSettle(TimeSpan Window, TimeSpan Poll, TimeSpa
 
 internal sealed record ReviewAudioStream(string Codec, int SampleRate, int Channels);
 /// <summary>DecodeErrorsSha256 is null for a file that decodes cleanly under the strict check.
-/// Otherwise it fingerprints the bounded, address-normalized diagnostics of a tolerant decode:
-/// a copy is then only accepted when it reproduces exactly the same audio and the same errors.</summary>
+/// Otherwise it fingerprints the bounded, address-normalized diagnostics of a tolerant decode.
+/// The diagnostic text is evidence only: a retag can move the parser's resync point, so the
+/// copy is accepted on bit-identical encoded payload and decoded PCM, with damage on both
+/// sides or on neither.</summary>
 internal sealed record ReviewAudioProof(string Version, string ContentSha256, long SizeBytes,
     string EncodedAudioSha256, string DecodedAudioSha256, IReadOnlyList<ReviewAudioStream> Streams, DateTime VerifiedAtUtc,
     string? DecodeErrorsSha256 = null);
@@ -93,7 +95,7 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
             var failure = !left.Streams.SequenceEqual(right.Streams) ? "stream_layout_changed"
                 : left.EncodedAudioSha256 != right.EncodedAudioSha256 ? "encoded_audio_changed"
                 : left.DecodedAudioSha256 != right.DecodedAudioSha256 ? "decoded_audio_changed"
-                : left.DecodeErrorsSha256 != right.DecodeErrorsSha256 ? "decode_errors_changed" : null;
+                : (left.DecodeErrorsSha256 is null) != (right.DecodeErrorsSha256 is null) ? "decode_errors_changed" : null;
             if (failure is null)
             {
                 stage = "comparison";
