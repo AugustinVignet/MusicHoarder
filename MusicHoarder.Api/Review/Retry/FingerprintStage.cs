@@ -85,6 +85,9 @@ internal static class FingerprintStage
                         catch (Exception e) when (e is TagLib.CorruptFileException or TagLib.UnsupportedFormatException or ArgumentException) { }
                         if (duration < 1) { state = "failed"; code = "no_usable_audio"; }
                         else if (!audio.Verified) { state = "qualificationRequired"; code = "source_audio:" + audio.FailureCode; }
+                        // The verifier tolerates damage reproduced on both sides of a copy; a source checked
+                        // against itself always reproduces it, so a fingerprint still requires clean decoding.
+                        else if (audio.Source?.DecodeErrorsSha256 is not null) { state = "qualificationRequired"; code = "source_audio:audio_errors_reported"; }
                         else if (Math.Abs(duration - calculated.DurationSeconds) > Math.Max(2, duration * .01))
                         { state = "qualificationRequired"; code = "fingerprint_duration_disagrees_with_source"; }
                         candidate = JsonSerializer.Serialize(new { validationVersion = FpcalcService.ValidationVersion,
