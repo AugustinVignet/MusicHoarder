@@ -165,13 +165,18 @@ public sealed class Mp3TagCompatibilityTests : IDisposable
     [AudioToolsTheory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task TrulyUndecodablePartialFrameWithId3v1_IsStillRefused(bool legacyTag)
+    public async Task TrulyUndecodablePartialFrameWithId3v1_IsDetected_AndOnlyToleratedWhenReproduced(bool legacyTag)
     {
-        var path = Create("invalid-partial-v1", legacyTag ? LegacyTag(LegacyFrame("TT2", [0, .. "Old title"u8])) : [],
-            [.. AudioWithPartialFinalFrame(), .. "TAG"u8, .. new byte[125]]);
-        var result = await new ReviewAudioVerifier(new ReviewAudioCommandRunner(AudioTools.Ffmpeg!)).VerifyAsync(path, path);
-        Assert.False(result.Verified); Assert.Equal("source", result.FailedStage);
-        Assert.Equal("audio_errors_reported", result.FailureCode);
+        var tag = legacyTag ? LegacyTag(LegacyFrame("TT2", [0, .. "Old title"u8])) : [];
+        var path = Create("invalid-partial-v1", tag, [.. AudioWithPartialFinalFrame(), .. "TAG"u8, .. new byte[125]]);
+        var verifier = new ReviewAudioVerifier(new ReviewAudioCommandRunner(AudioTools.Ffmpeg!));
+        var same = await verifier.VerifyAsync(path, path);
+        Assert.True(same.Verified, $"{same.FailedStage}:{same.FailureCode}");
+        Assert.NotNull(same.Source!.DecodeErrorsSha256);
+        // A candidate whose damaged tail differs is never treated as the same audio.
+        var repaired = Create("repaired-partial-v1", tag, [.. AudioWithPartialFinalFrame(224), .. "TAG"u8, .. new byte[125]]);
+        var differs = await verifier.VerifyAsync(path, repaired);
+        Assert.False(differs.Verified); Assert.Equal("comparison", differs.FailedStage);
     }
 
     private string Create(string name, byte[] tag, byte[] audio)
