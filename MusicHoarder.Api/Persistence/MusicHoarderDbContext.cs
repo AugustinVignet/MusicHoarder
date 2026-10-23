@@ -46,6 +46,7 @@ public class MusicHoarderDbContext : DbContext
     public DbSet<ReviewCopyRequestKey> ReviewCopyRequestKeys { get; set; } = null!;
     public DbSet<ReviewCopyJob> ReviewCopyJobs { get; set; } = null!;
     public DbSet<ReviewCopyTrack> ReviewCopyTracks { get; set; } = null!;
+    public DbSet<ReviewDestinationRelease> ReviewDestinationReleases { get; set; } = null!;
     public DbSet<ReviewAudioCacheEntry> ReviewAudioCache { get; set; } = null!;
     public DbSet<ReviewPlan> ReviewPlans { get; set; } = null!;
     public DbSet<SongDuplicateLink> SongDuplicateLinks { get; set; } = null!;
@@ -61,6 +62,7 @@ public class MusicHoarderDbContext : DbContext
     public DbSet<AlbumCompletionState> AlbumCompletionStates { get; set; } = null!;
     public DbSet<SongMetadataChange> SongMetadataChanges { get; set; } = null!;
     public DbSet<SongQualityGrade> SongQualityGrades { get; set; } = null!;
+    public DbSet<SongGradeAcknowledgement> SongGradeAcknowledgements { get; set; } = null!;
     public DbSet<DirectoryPreference> DirectoryPreferences { get; set; } = null!;
     public DbSet<SpotifySettings> SpotifySettings { get; set; } = null!;
     public DbSet<SpotifyTrackLibraryMatch> SpotifyTrackLibraryMatches { get; set; } = null!;
@@ -165,6 +167,13 @@ public class MusicHoarderDbContext : DbContext
         {
             entity.HasKey(t => new { t.JobId, t.SongId });
             entity.HasIndex(t => new { t.SongId, t.State });
+        });
+        modelBuilder.Entity<ReviewDestinationRelease>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.OwnerUserId, r.RequestId }).IsUnique();
+            entity.HasIndex(r => r.FoldedPath);
+            entity.HasQueryFilter(r => !hasUser || r.OwnerUserId == userId);
         });
         modelBuilder.Entity<ReviewAudioCacheEntry>().HasKey(p => new { p.Version, p.ContentSha256 });
         modelBuilder.Entity<SongMetadata>().Property(s => s.ReviewPlanId).IsConcurrencyToken();
@@ -376,6 +385,21 @@ public class MusicHoarderDbContext : DbContext
 
             // Mirror Song's tenancy filter so this dependent is filtered exactly when its principal
             // would be. Background services bypass via .IgnoreQueryFilters().
+            entity.HasQueryFilter(e => !hasUser || e.OwnerUserId == userId);
+        });
+
+        modelBuilder.Entity<SongGradeAcknowledgement>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            // One acknowledgement row per grade; undo keeps the row and stamps RevokedAtUtc.
+            entity.HasIndex(e => e.GradeId).IsUnique();
+            entity.HasIndex(e => new { e.OwnerUserId, e.SongId });
+            entity.Property(e => e.Reason).HasMaxLength(2048);
+            entity.Property(e => e.EvidenceReference).HasMaxLength(1024);
+            entity.HasOne(e => e.Grade)
+                .WithMany()
+                .HasForeignKey(e => e.GradeId)
+                .OnDelete(DeleteBehavior.Cascade);
             entity.HasQueryFilter(e => !hasUser || e.OwnerUserId == userId);
         });
 

@@ -1018,7 +1018,8 @@ public class LibraryBuilderService(
             .Select(s => (int?)s.Id)
             .FirstOrDefaultAsync(ct);
         var foldedPath = destinationPath.ToLowerInvariant();
-        var retainedByReview = await db.ReviewCopyTracks.AnyAsync(t => t.SongId != songId
+        var released = await Review.Copy.ReviewDestinationReleases.ReleasedJobIdsAsync(db, foldedPath, ct);
+        var retainedByReview = await db.ReviewCopyTracks.AnyAsync(t => t.SongId != songId && !released.Contains(t.JobId)
             && (t.DestinationPath.ToLower() == foldedPath || t.BackupPath.ToLower() == foldedPath
                 || t.OldDestinationPath != null && t.OldDestinationPath.ToLower() == foldedPath
                 || t.OldPreviousPath != null && t.OldPreviousPath.ToLower() == foldedPath), ct);

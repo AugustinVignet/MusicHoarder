@@ -16,6 +16,7 @@ internal static class ReviewCopyRollback
         db.ChangeTracker.Clear();
         var job = await ReviewCopyJobs.OwnedAsync(db, owner, id, ct);
         if (job.State == "rolledBack") return;
+        if (await ReviewDestinationReleases.TouchesReleasedPathAsync(db, job, ct)) Refuse("destination_reservation_released");
         var ids = job.Tracks.Select(t => t.SongId).ToArray();
         var songs = await db.Songs.IgnoreQueryFilters().Where(s => s.OwnerUserId == owner && ids.Contains(s.Id)).ToListAsync(ct);
         await ManualReviewMetadata.LoadAsync(db, songs, ct);

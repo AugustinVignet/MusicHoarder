@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using MusicHoarder.Api.Auth;
+using MusicHoarder.Api.Auth.EndpointFilters;
 using MusicHoarder.Api.Options;
 using MusicHoarder.Api.Persistence;
 using MusicHoarder.Api.Quality;
@@ -59,6 +61,26 @@ public static class QualityEndpoints
             .WithSummary("Enqueue every gradeable song under a source directory for AI grading.")
             .WithTags("Quality");
 
+        app.MapPost("/api/quality/songs/{id:int}/acknowledge", AcknowledgeGrade).RequireAdmin()
+            .WithName("AcknowledgeSongQualityGrade")
+            .WithSummary("Record that the song's current AI flag is a false positive, bound to that exact grade. A newer grade flags it again.")
+            .WithTags("Quality");
+
+        app.MapDelete("/api/quality/songs/{id:int}/acknowledge", RevokeAcknowledgement).RequireAdmin()
+            .WithName("RevokeSongQualityAcknowledgement")
+            .WithSummary("Undo the song's active false-positive acknowledgements; the AI flag shows again.")
+            .WithTags("Quality");
+
+        app.MapGet("/api/quality/acknowledgements", ListAcknowledgements).RequireAdmin()
+            .WithName("ListSongQualityAcknowledgements")
+            .WithSummary("False-positive acknowledgements, newest first, paged.")
+            .WithTags("Quality");
+
+        app.MapPost("/api/quality/regrade-flagged", RegradeFlagged).RequireAdmin()
+            .WithName("RegradeFlaggedQuality")
+            .WithSummary("Force a fresh grade for the AI-flagged, unacknowledged songs (optionally only explicit ids), worst first, bounded. Each grade is a paid LLM call.")
+            .WithTags("Quality");
+
         app.MapGet("/api/quality/progress", GetProgress)
             .WithName("GetQualityProgress")
             .WithSummary("Current AI grading run progress.")
@@ -97,7 +119,8 @@ public static class QualityEndpoints
         string? DestinationPathPreview,
         DateTime GradedAtUtc,
         int PromptVersion,
-        string? Model);
+        string? Model,
+        int GradeId);
 
     private static async Task<List<GradeRowDto>> LoadGradeRowsAsync(MusicHoarderDbContext db, CancellationToken ct)
     {
@@ -108,9 +131,17 @@ public static class QualityEndpoints
                     s.Id, s.SourcePath, s.FileName, s.Artist, s.Title, s.Album,
                     g.Score, g.Verdict, g.Summary, g.IssuesJson,
                     g.EnrichmentStatusAtGrade, g.DestinationPathPreview, g.GradedAtUtc,
-                    g.PromptVersion, g.Model))
+                    g.PromptVersion, g.Model, g.Id))
             .ToListAsync(ct);
     }
+
+    // Grade ids an active (not revoked) false-positive acknowledgement covers.
+    private static async Task<HashSet<int>> AcknowledgedGradeIdsAsync(MusicHoarderDbContext db, CancellationToken ct)
+        => (await db.SongGradeAcknowledgements.Where(a => a.RevokedAtUtc == null).Select(a => a.GradeId).ToListAsync(ct)).ToHashSet();
+
+    // The Inbox's AI-flagged queue: a wrong/questionable latest grade nobody acknowledged as a false positive.
+    private static bool IsOpenAiFlag(GradeRowDto r, HashSet<int> acknowledged)
+        => VerdictSeverity.IsAiFlagged(r.Verdict) && !acknowledged.Contains(r.GradeId);
 
     private static string DirectoryOf(string sourcePath)
         => Path.GetDirectoryName(sourcePath)?.Replace('\\', '/') ?? "/";
@@ -133,9 +164,11 @@ public static class QualityEndpoints
     };
 
     // The worst-offender shape plus the workbench bucket, for the AI-quality master list.
-    private static object ToSongRow(GradeRowDto r, string currentModel) => new
+    private static object ToSongRow(GradeRowDto r, string currentModel, bool acknowledged) => new
     {
         songId = r.SongId,
+        gradeId = r.GradeId,
+        acknowledged,
         fileName = r.FileName,
         sourcePath = r.SourcePath,
         artist = r.Artist,
@@ -224,7 +257,9 @@ public static class QualityEndpoints
 
         // The Inbox's "AI flagged" count: exactly what the wrong-or-questionable category lists, so a
         // badge never has to count the capped worst-offender list.
-        var aiFlaggedCount = rows.Count(r => VerdictSeverity.IsAiFlagged(r.Verdict));
+        var acknowledged = await AcknowledgedGradeIdsAsync(db, ct);
+        var aiFlaggedCount = rows.Count(r => IsOpenAiFlag(r, acknowledged));
+        var acknowledgedFlagCount = rows.Count(r => VerdictSeverity.IsAiFlagged(r.Verdict) && acknowledged.Contains(r.GradeId));
 
         return Results.Ok(new
         {
@@ -236,6 +271,7 @@ public static class QualityEndpoints
             verifiedCleanCount = verified,
             outdatedCount,
             aiFlaggedCount,
+            acknowledgedFlagCount,
             worstOffenders = worst,
             directories,
         });
@@ -244,7 +280,8 @@ public static class QualityEndpoints
     /// <summary>
     /// Graded songs for the AI-quality workbench master list, filtered by <paramref name="category"/>
     /// (flagged / silent / verified, a verdict bucket, "wrong-or-questionable", or "all"), ordered
-    /// worst-first, paged.
+    /// worst-first, paged. "wrong-or-questionable" leaves out acknowledged false positives unless
+    /// <paramref name="includeAcknowledged"/> is set.
     /// </summary>
     // category/skip/take are optional with defaults — minimal API treats a non-nullable `int`
     // query param as REQUIRED and 400s when it's absent, so they must have defaults here.
@@ -254,7 +291,8 @@ public static class QualityEndpoints
         CancellationToken ct,
         string? category = null,
         int skip = 0,
-        int take = 100)
+        int take = 100,
+        bool includeAcknowledged = false)
     {
         var cat = string.IsNullOrWhiteSpace(category) ? "all" : category.Trim().ToLowerInvariant();
         var pageSize = take <= 0 ? 100 : Math.Min(take, 500);
@@ -263,9 +301,14 @@ public static class QualityEndpoints
 
         var rows = await LoadGradeRowsAsync(db, ct);
 
-        var filtered = OrderWorstFirst(rows.Where(r => MatchesCategory(r, cat))).ToList();
+        var acknowledged = await AcknowledgedGradeIdsAsync(db, ct);
+        var hideAcknowledged = cat == "wrong-or-questionable" && !includeAcknowledged;
 
-        var items = filtered.Skip(offset).Take(pageSize).Select(r => ToSongRow(r, currentModel)).ToList();
+        var filtered = OrderWorstFirst(rows.Where(r => MatchesCategory(r, cat)
+            && !(hideAcknowledged && acknowledged.Contains(r.GradeId)))).ToList();
+
+        var items = filtered.Skip(offset).Take(pageSize)
+            .Select(r => ToSongRow(r, currentModel, acknowledged.Contains(r.GradeId))).ToList();
 
         return Results.Ok(new { total = filtered.Count, skip = offset, take = pageSize, items });
     }
@@ -315,11 +358,17 @@ public static class QualityEndpoints
             return Results.Ok(new { songId = id, graded = false });
 
         var historyCount = await db.SongQualityGrades.CountAsync(g => g.SongId == id, ct);
+        var acknowledgement = await db.SongGradeAcknowledgements
+            .Where(a => a.GradeId == grade.Id && a.RevokedAtUtc == null)
+            .Select(a => new { a.Reason, a.EvidenceReference, a.CreatedAtUtc })
+            .FirstOrDefaultAsync(ct);
 
         return Results.Ok(new
         {
             songId = id,
             graded = true,
+            gradeId = grade.Id,
+            acknowledgement,
             score = grade.Score,
             verdict = grade.Verdict.ToString(),
             summary = grade.Summary,
@@ -419,6 +468,136 @@ public static class QualityEndpoints
 
         channel.EnqueueRange(ids, force: false);
         return Results.Ok(new { enqueued = ids.Count });
+    }
+
+    internal record AcknowledgeGradeRequest(int? GradeId, DateTime? GradedAtUtc, string? Reason, string? EvidenceReference);
+
+    internal static async Task<IResult> AcknowledgeGrade(
+        int id, AcknowledgeGradeRequest request, MusicHoarderDbContext db, ICurrentUserAccessor user, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.Reason))
+            return Results.BadRequest(new { code = "reason_required", message = "Explain why the AI flag is a false positive." });
+        if (request.Reason.Length > 2048 || request.EvidenceReference?.Length > 1024)
+            return Results.BadRequest(new { code = "too_long", message = "Reason is limited to 2048 and evidence to 1024 characters." });
+        if (request.GradeId is null && request.GradedAtUtc is null)
+            return Results.BadRequest(new { code = "grade_required", message = "Name the exact grade (gradeId or gradedAtUtc) being acknowledged." });
+
+        var exists = await db.Songs.AnyAsync(s => s.Id == id && s.DeletedAtUtc == null, ct);
+        if (!exists)
+            return Results.NotFound(new { message = $"Song {id} not found." });
+        var latest = await db.SongQualityGrades.Where(g => g.SongId == id)
+            .OrderByDescending(g => g.GradedAtUtc).ThenByDescending(g => g.Id).FirstOrDefaultAsync(ct);
+        if (latest is null)
+            return Results.NotFound(new { code = "no_grade", message = $"Song {id} has no AI grade." });
+        // Microsecond tolerance: PostgreSQL keeps microseconds, clients echo what the list returned.
+        var sameTime = request.GradedAtUtc is not { } at || Math.Abs((at.ToUniversalTime() - latest.GradedAtUtc).Ticks) < 10;
+        if ((request.GradeId is { } gradeId && gradeId != latest.Id) || !sameTime)
+            return Results.Conflict(new { code = "grade_not_current", message = "A newer grade exists; review it before acknowledging.", currentGradeId = latest.Id });
+        if (!VerdictSeverity.IsAiFlagged(latest.Verdict))
+            return Results.Conflict(new { code = "not_flagged", message = "The current grade is not an AI flag." });
+
+        var ack = await db.SongGradeAcknowledgements.SingleOrDefaultAsync(a => a.GradeId == latest.Id, ct);
+        // EF assigns a temporary key on Add, so newness is tracked explicitly rather than read from Id.
+        var created = ack is null;
+        if (ack is null)
+        {
+            ack = new SongGradeAcknowledgement { OwnerUserId = latest.OwnerUserId, SongId = id, GradeId = latest.Id };
+            db.SongGradeAcknowledgements.Add(ack);
+        }
+        if (created || ack.RevokedAtUtc is not null)
+        {
+            ack.Reason = request.Reason.Trim();
+            ack.EvidenceReference = request.EvidenceReference?.Trim();
+            ack.ActorUserId = user.UserId;
+            ack.CreatedAtUtc = DateTime.UtcNow;
+            ack.RevokedAtUtc = null;
+            await db.SaveChangesAsync(ct);
+        }
+        return Results.Ok(AcknowledgementDto(ack, latest.Id));
+    }
+
+    internal static async Task<IResult> RevokeAcknowledgement(int id, MusicHoarderDbContext db, CancellationToken ct)
+    {
+        var active = await db.SongGradeAcknowledgements.Where(a => a.SongId == id && a.RevokedAtUtc == null).ToListAsync(ct);
+        if (active.Count == 0)
+            return Results.NotFound(new { code = "no_acknowledgement", message = $"Song {id} has no active acknowledgement." });
+        foreach (var ack in active) ack.RevokedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return Results.Ok(new { songId = id, revoked = active.Count });
+    }
+
+    internal static async Task<IResult> ListAcknowledgements(
+        MusicHoarderDbContext db, CancellationToken ct, bool includeRevoked = false, int skip = 0, int take = 100)
+    {
+        var query = db.SongGradeAcknowledgements.Where(a => includeRevoked || a.RevokedAtUtc == null);
+        var total = await query.CountAsync(ct);
+        var page = await query.OrderByDescending(a => a.CreatedAtUtc).ThenByDescending(a => a.Id)
+            .Skip(Math.Max(skip, 0)).Take(take <= 0 ? 100 : Math.Min(take, 500)).ToListAsync(ct);
+        var songIds = page.Select(a => a.SongId).Distinct().ToArray();
+        var current = await db.SongQualityGrades.LatestPerSong().Where(g => songIds.Contains(g.SongId))
+            .Select(g => new { g.SongId, g.Id }).ToListAsync(ct);
+        return Results.Ok(new
+        {
+            total,
+            items = page.Select(a => AcknowledgementDto(a, current.FirstOrDefault(c => c.SongId == a.SongId)?.Id)).ToList(),
+        });
+    }
+
+    private static object AcknowledgementDto(SongGradeAcknowledgement a, int? currentGradeId) => new
+    {
+        id = a.Id,
+        songId = a.SongId,
+        gradeId = a.GradeId,
+        reason = a.Reason,
+        evidenceReference = a.EvidenceReference,
+        createdAtUtc = a.CreatedAtUtc,
+        revokedAtUtc = a.RevokedAtUtc,
+        // False once a newer grade replaced the acknowledged one: that newer grade is flagged again.
+        isCurrentGrade = currentGradeId == a.GradeId,
+    };
+
+    internal record RegradeFlaggedRequest(int[]? SongIds, int? Limit);
+
+    internal const int DefaultRegradeBatch = 100;
+    internal const int MaxRegradeBatch = 500;
+
+    /// <summary>Open AI flags to re-grade, worst first: wrong/questionable latest grade, not acknowledged,
+    /// still gradeable. Explicit ids narrow the set; ids outside it are reported, never graded.</summary>
+    internal static async Task<(List<int> Selected, int Remaining, List<int> NotFlagged)> SelectRegradeTargetsAsync(
+        MusicHoarderDbContext db, int[]? songIds, int? limit, CancellationToken ct)
+    {
+        var rows = await LoadGradeRowsAsync(db, ct);
+        var acknowledged = await AcknowledgedGradeIdsAsync(db, ct);
+        var gradeable = (await db.Songs
+            .Where(s => s.DeletedAtUtc == null && !s.IsDuplicate && GradeableStatuses.Contains(s.EnrichmentStatus))
+            .Select(s => s.Id).ToListAsync(ct)).ToHashSet();
+        var open = OrderWorstFirst(rows.Where(r => IsOpenAiFlag(r, acknowledged) && gradeable.Contains(r.SongId)))
+            .Select(r => r.SongId).ToList();
+        var notFlagged = new List<int>();
+        if (songIds is { Length: > 0 })
+        {
+            var wanted = songIds.ToHashSet();
+            notFlagged = wanted.Except(open).Order().ToList();
+            open = open.Where(wanted.Contains).ToList();
+        }
+        var batch = Math.Clamp(limit ?? DefaultRegradeBatch, 1, MaxRegradeBatch);
+        return (open.Take(batch).ToList(), Math.Max(open.Count - batch, 0), notFlagged);
+    }
+
+    private static async Task<IResult> RegradeFlagged(
+        RegradeFlaggedRequest? request, MusicHoarderDbContext db, QualityGradingChannel channel,
+        IOptionsMonitor<QualityGradingOptions> options, IRuntimeSettingsService runtimeSettings,
+        CancellationToken ct)
+    {
+        if (!options.CurrentValue.IsConfigured)
+            return NotConfiguredProblem();
+        if (!(await runtimeSettings.GetAsync(ct)).QualityGradingEnabled)
+            return GradingDisabledProblem();
+
+        var (selected, remaining, notFlagged) = await SelectRegradeTargetsAsync(db, request?.SongIds, request?.Limit, ct);
+        // force: a fresh LLM call even when the dossier is unchanged — each one is billed.
+        channel.EnqueueRange(selected, force: true);
+        return Results.Ok(new { enqueued = selected.Count, songIds = selected, remaining, notFlagged, paidCalls = selected.Count });
     }
 
     private record GradeDirectoryRequest(string Path);

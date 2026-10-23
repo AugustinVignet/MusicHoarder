@@ -219,3 +219,35 @@ Existing retained copy jobs can be retried without replaying metadata approval.
 The boundary layout follows the [ID3v2.4 structure specification](https://id3.org/id3v2.4.0-structure).
 Regression coverage includes real retagged partial-frame MP3s with existing
 ID3v1 tags, changed valid audio, malformed boundaries and old proof-cache entries.
+
+## Releasing a historical destination reservation
+
+A finished job keeps reserving every path it touched (destination, retained backup,
+old destination and old previous path) so that its rollback can always restore the
+old generation. After that old generation has been removed on purpose, the path can
+stay blocked forever: another song planned to that exact path fails publication with
+`destination_held_by_another_track`.
+
+`POST /api/review/destination-reservations/release` (Administer) lifts such a
+reservation explicitly:
+
+```json
+{ "requestId": "11111111-1111-4111-8111-111111111111",
+  "destinationPath": "/music/destination/Example/2000 - Example/01 - Example.flac",
+  "reason": "Old generation removed after verification; slot needed by another track" }
+```
+
+It is refused unless all of these hold: no file exists at the path
+(`destination_file_present`), no active song is built there (`destination_in_use`),
+every job referencing it is finished (`job_not_finished`), no other owner holds it
+(`foreign_reservation`) and something historical actually reserves it
+(`reservation_not_found`). The writer gate is held (`writer_busy` otherwise).
+
+The durable receipt lists the released jobs — those whose reference is a past
+generation (old/retained path, or a destination they published) — and the songs whose
+`PreviousDestinationPath` pointed there, which is cleared. A job that merely targets
+the path keeps its claim. Publication and the legacy builder then ignore only those
+recorded references; any other job still blocks. Rolling back a released job is
+refused with `destination_reservation_released` before anything is touched. Reusing
+the request UUID returns the same receipt; another path under it is `request_key_reused`.
+`GET /api/review/destination-reservations/releases` lists receipts, newest first.

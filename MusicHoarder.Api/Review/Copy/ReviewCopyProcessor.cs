@@ -175,7 +175,9 @@ internal sealed class ReviewCopyProcessor(MusicHoarderDbContext db, IFileSystem 
         var occupied = await db.Songs.IgnoreQueryFilters().AnyAsync(s => s.Id != track.SongId && s.DeletedAtUtc == null
             && ((s.DestinationPath != null && s.DestinationPath.ToLower() == path)
                 || (s.PreviousDestinationPath != null && s.PreviousDestinationPath.ToLower() == path)), ct);
-        var held = await db.ReviewCopyTracks.AnyAsync(t => t.JobId != job.Id && t.SongId != track.SongId
+        // An explicit release lifts only the historical reservations it recorded; any other job still blocks.
+        var released = await ReviewDestinationReleases.ReleasedJobIdsAsync(db, path, ct);
+        var held = await db.ReviewCopyTracks.AnyAsync(t => t.JobId != job.Id && t.SongId != track.SongId && !released.Contains(t.JobId)
             && (t.DestinationPath.ToLower() == path || t.BackupPath.ToLower() == path
                 || (t.OldDestinationPath != null && t.OldDestinationPath.ToLower() == path)
                 || (t.OldPreviousPath != null && t.OldPreviousPath.ToLower() == path)), ct);

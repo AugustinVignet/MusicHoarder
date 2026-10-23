@@ -29,3 +29,7 @@ public sealed record ReviewCopyJobResult(Guid Id, Guid PlanId, Guid RequestId, s
     string AlbumCompleteness, IReadOnlyList<ReviewCopyTrackResult> Tracks);
 
 public sealed record ReviewPlanFileFingerprint(string Path, string Presence, string? Sha256);
+
+public sealed record ReviewDestinationReleaseRequest(Guid RequestId, string DestinationPath, string Reason);
+public sealed record ReviewDestinationReleaseResult(Guid Id, Guid RequestId, string DestinationPath, string Reason,
+    DateTime CreatedAtUtc, IReadOnlyList<Guid> ReleasedJobIds, IReadOnlyList<int> ClearedPreviousSongIds);

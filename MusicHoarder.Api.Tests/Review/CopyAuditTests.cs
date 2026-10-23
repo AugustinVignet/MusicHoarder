@@ -483,6 +483,27 @@ public sealed class CopyAuditTests : IDisposable
     }
 
     [PostgresFact]
+    public async Task Migration88_UpDownUp_AddsOnlyEmptyReleaseAndAcknowledgementTables()
+    {
+        await using var store = await Store.CreateAsync(migrate: true);
+        Assert.False(store.Db.Database.HasPendingModelChanges());
+        var all = store.Db.Database.GetMigrations().ToArray();
+        Assert.Equal(88, all.Length);
+        Assert.EndsWith("AddDurableCopyAudits", all[^2]);
+        var migrator = store.Db.GetService<IMigrator>();
+        await migrator.MigrateAsync(all[^2]);
+        await Add(store.Db, 1);
+        await migrator.MigrateAsync();
+        Assert.Equal(1, await store.Db.Songs.CountAsync());
+        Assert.Empty(await store.Db.ReviewDestinationReleases.ToListAsync());
+        Assert.Empty(await store.Db.SongGradeAcknowledgements.ToListAsync());
+        await migrator.MigrateAsync(all[^2]);
+        Assert.Equal(1, await store.Db.Database.SqlQueryRaw<int>("SELECT count(*)::int AS \"Value\" FROM \"Songs\"").SingleAsync());
+        await migrator.MigrateAsync();
+        Assert.False(store.Db.Database.HasPendingModelChanges());
+    }
+
+    [PostgresFact]
     public async Task AdditiveMigrationFromSchema86PreservesRealPlanOutboxSnapshotsAndSongs()
     {
         await using var store = await Store.CreateAsync(migrate: true);
@@ -498,7 +519,7 @@ public sealed class CopyAuditTests : IDisposable
         var copies = JsonSerializer.Serialize(await store.Db.ReviewCopyTracks.AsNoTracking().OrderBy(t => t.SongId).ToArrayAsync());
         await migrator.MigrateAsync();
         Assert.Equal(before, await MusicalSnapshot(store.Db)); Assert.Equal(copies, JsonSerializer.Serialize(await store.Db.ReviewCopyTracks.AsNoTracking().OrderBy(t => t.SongId).ToArrayAsync()));
-        Assert.EndsWith("AddDurableCopyAudits", (await store.Db.Database.GetAppliedMigrationsAsync()).Last());
+        Assert.EndsWith("AddDestinationReleasesAndGradeAcknowledgements", (await store.Db.Database.GetAppliedMigrationsAsync()).Last());
         Assert.Empty(await store.Db.CopyAuditJobs.ToListAsync());
         var fresh = await CopyAuditJobs.CreateAsync(store.Db, Files, Owner, await Request(store.Db, [1]), default);
         Assert.Equal("queued", fresh.State); Assert.Equal(1, await store.Db.ReviewCopyJobs.CountAsync());

@@ -5,6 +5,7 @@ using MusicHoarder.Api.Endpoints;
 using MusicHoarder.Api.Options;
 using MusicHoarder.Api.Persistence;
 using MusicHoarder.Api.Quality;
+using MusicHoarder.Api.Tests.Auth;
 
 namespace MusicHoarder.Api.Tests.Endpoints;
 
@@ -278,5 +279,106 @@ public class QualityEndpointsTests
         Assert.Equal("Wrong", worstByDir["/music/mixed"]);
         Assert.Equal("Good", worstByDir["/music/good"]);
         Assert.Equal("Ungradeable", worstByDir["/music/unjudged"]);
+    }
+
+    private static readonly TestCurrentUserAccessor Owner = new(TestCurrentUserAccessor.OwnerUser);
+
+    private static int Status(IResult result) => ((IStatusCodeHttpResult)result).StatusCode!.Value;
+
+    private static async Task<int> FlaggedTotal(MusicHoarderDbContext db, bool includeAcknowledged = false) => Read<int>(
+        await QualityEndpoints.GetSongs(db, Opts(), CancellationToken.None, category: "wrong-or-questionable",
+            includeAcknowledged: includeAcknowledged), "total");
+
+    [Fact]
+    public async Task AcknowledgedFalsePositive_LeavesTheAiFlaggedQueue_UntilANewerGrade()
+    {
+        using var db = NewContext();
+        var song = AddSong(db, 1, EnrichmentStatus.Matched);
+        AddGrade(db, song.Id, SongQualityVerdict.Questionable, 55, "Matched", at: DateTime.UtcNow.AddHours(-2));
+        AddGraded(db, 2, 1, SongQualityVerdict.Wrong, 20);
+        var grade = db.SongQualityGrades.Single(g => g.SongId == song.Id);
+
+        var first = await QualityEndpoints.AcknowledgeGrade(song.Id,
+            new(grade.Id, null, "Licensed excerpt confirms the recording", "cache:sha256:example"), db, Owner, CancellationToken.None);
+        Assert.Equal(StatusCodes.Status200OK, Status(first));
+        Assert.Equal(1, await FlaggedTotal(db));
+        Assert.Equal(2, await FlaggedTotal(db, includeAcknowledged: true));
+        var overview = await QualityEndpoints.GetOverview(db, Opts(), CancellationToken.None);
+        Assert.Equal(1, Read<int>(overview, "aiFlaggedCount"));
+        Assert.Equal(1, Read<int>(overview, "acknowledgedFlagCount"));
+
+        // Same grade again is idempotent; the stored decision is unchanged.
+        var again = await QualityEndpoints.AcknowledgeGrade(song.Id, new(null, grade.GradedAtUtc, "Other wording", null), db, Owner, CancellationToken.None);
+        Assert.Equal(Read<int>(first, "id"), Read<int>(again, "id"));
+        Assert.Equal("Licensed excerpt confirms the recording", Read<string>(again, "reason"));
+
+        // A newer grade is not covered: the song is flagged again and the old binding is refused.
+        AddGrade(db, song.Id, SongQualityVerdict.Questionable, 50, "Matched");
+        Assert.Equal(2, await FlaggedTotal(db));
+        var stale = await QualityEndpoints.AcknowledgeGrade(song.Id, new(grade.Id, null, "Old grade", null), db, Owner, CancellationToken.None);
+        Assert.Equal(StatusCodes.Status409Conflict, Status(stale));
+        var listed = Read<List<object>>(await QualityEndpoints.ListAcknowledgements(db, CancellationToken.None), "items");
+        Assert.False(Prop<bool>(Assert.Single(listed), "isCurrentGrade"));
+    }
+
+    [Fact]
+    public async Task RevokedAcknowledgement_FlagsTheSongAgain_AndStaysInHistory()
+    {
+        using var db = NewContext();
+        var song = AddSong(db, 1, EnrichmentStatus.Matched);
+        AddGrade(db, song.Id, SongQualityVerdict.Wrong, 15, "Matched");
+        var grade = db.SongQualityGrades.Single();
+        await QualityEndpoints.AcknowledgeGrade(song.Id, new(grade.Id, null, "Reviewed", null), db, Owner, CancellationToken.None);
+        Assert.Equal(0, await FlaggedTotal(db));
+
+        Assert.Equal(StatusCodes.Status200OK, Status(await QualityEndpoints.RevokeAcknowledgement(song.Id, db, CancellationToken.None)));
+        Assert.Equal(1, await FlaggedTotal(db));
+        Assert.Equal(StatusCodes.Status404NotFound, Status(await QualityEndpoints.RevokeAcknowledgement(song.Id, db, CancellationToken.None)));
+        Assert.Equal(0, Read<int>(await QualityEndpoints.ListAcknowledgements(db, CancellationToken.None), "total"));
+        Assert.Equal(1, Read<int>(await QualityEndpoints.ListAcknowledgements(db, CancellationToken.None, includeRevoked: true), "total"));
+
+        // Acknowledging the same grade again reactivates its single row.
+        await QualityEndpoints.AcknowledgeGrade(song.Id, new(grade.Id, null, "Reviewed again", null), db, Owner, CancellationToken.None);
+        Assert.Equal(0, await FlaggedTotal(db));
+        Assert.Single(db.SongGradeAcknowledgements);
+    }
+
+    [Fact]
+    public async Task Acknowledge_RequiresReasonExactGradeAndAnAiFlag()
+    {
+        using var db = NewContext();
+        var good = AddSong(db, 1, EnrichmentStatus.Matched);
+        AddGrade(db, good.Id, SongQualityVerdict.Good, 85, "Matched");
+        var id = db.SongQualityGrades.Single().Id;
+
+        Assert.Equal(StatusCodes.Status400BadRequest, Status(await QualityEndpoints.AcknowledgeGrade(good.Id, new(id, null, " ", null), db, Owner, CancellationToken.None)));
+        Assert.Equal(StatusCodes.Status400BadRequest, Status(await QualityEndpoints.AcknowledgeGrade(good.Id, new(null, null, "Reason", null), db, Owner, CancellationToken.None)));
+        Assert.Equal(StatusCodes.Status409Conflict, Status(await QualityEndpoints.AcknowledgeGrade(good.Id, new(id, null, "Reason", null), db, Owner, CancellationToken.None)));
+        Assert.Equal(StatusCodes.Status404NotFound, Status(await QualityEndpoints.AcknowledgeGrade(999, new(id, null, "Reason", null), db, Owner, CancellationToken.None)));
+        Assert.Empty(db.SongGradeAcknowledgements);
+    }
+
+    [Fact]
+    public async Task RegradeSelection_IsWorstFirstBoundedAndSkipsAcknowledgedDuplicateAndUnflaggedSongs()
+    {
+        using var db = NewContext();
+        var wrong = AddSong(db, 1, EnrichmentStatus.Matched); AddGrade(db, wrong.Id, SongQualityVerdict.Wrong, 20, "Matched");
+        var questionable = AddSong(db, 2, EnrichmentStatus.Matched); AddGrade(db, questionable.Id, SongQualityVerdict.Questionable, 55, "Matched");
+        var acknowledged = AddSong(db, 3, EnrichmentStatus.Matched); AddGrade(db, acknowledged.Id, SongQualityVerdict.Wrong, 10, "Matched");
+        var duplicate = AddSong(db, 4, EnrichmentStatus.Matched); AddGrade(db, duplicate.Id, SongQualityVerdict.Wrong, 5, "Matched");
+        duplicate.IsDuplicate = true; db.SaveChanges();
+        var good = AddSong(db, 5, EnrichmentStatus.Matched); AddGrade(db, good.Id, SongQualityVerdict.Good, 90, "Matched");
+        await QualityEndpoints.AcknowledgeGrade(acknowledged.Id,
+            new(db.SongQualityGrades.Single(g => g.SongId == acknowledged.Id).Id, null, "Reviewed", null), db, Owner, CancellationToken.None);
+
+        var (all, rest, _) = await QualityEndpoints.SelectRegradeTargetsAsync(db, null, null, CancellationToken.None);
+        Assert.Equal([wrong.Id, questionable.Id], all);
+        Assert.Equal(0, rest);
+        var (one, remaining, _) = await QualityEndpoints.SelectRegradeTargetsAsync(db, null, 1, CancellationToken.None);
+        Assert.Equal([wrong.Id], one);
+        Assert.Equal(1, remaining);
+        var (picked, _, notFlagged) = await QualityEndpoints.SelectRegradeTargetsAsync(db, [questionable.Id, good.Id], null, CancellationToken.None);
+        Assert.Equal([questionable.Id], picked);
+        Assert.Equal([good.Id], notFlagged);
     }
 }

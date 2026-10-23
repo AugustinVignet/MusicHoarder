@@ -516,6 +516,83 @@ public sealed class ReviewCopyJobTests : IDisposable
         }
     }
 
+    [PostgresFact]
+    public async Task ReleasedHistoricalReservation_LetsAnotherSongPublish_AndRefusesOnlyThatRollback()
+    {
+        await using var store = await Store.CreateAsync();
+        var first = await AddSong(store.Db, number: 1);
+        var oldPath = first.DestinationPath!;
+        var moved = await Plan(store.Db, [first], new { Album = "Moved Program" });
+        await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, moved.Id, moved.Revision, default);
+        Assert.True(await Processor(store.Db).RunNextAsync(default));
+        store.Db.ChangeTracker.Clear();
+        var firstJob = await store.Db.ReviewCopyJobs.SingleAsync();
+        Assert.Equal("completed", firstJob.State);
+        Assert.True(File.Exists(oldPath)); // The old generation is retained, never deleted.
+        Assert.Equal(oldPath, (await store.Db.Songs.SingleAsync(s => s.Id == first.Id)).PreviousDestinationPath);
+
+        var second = await AddSong(store.Db, number: 2);
+        var release = new ReviewDestinationReleaseRequest(Guid.NewGuid(), oldPath, "Old generation removed; slot needed by another track");
+        Assert.Equal("destination_file_present", (await Assert.ThrowsAsync<ReviewPlanException>(
+            () => ReviewDestinationReleases.ReleaseAsync(store.Db, files, Owner, release, default))).Error.Code);
+
+        File.Delete(oldPath);
+        var takeOver = await Plan(store.Db, [second], new { TrackNumber = 1 });
+        Assert.True(takeOver.CanApply);
+        await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, takeOver.Id, takeOver.Revision, default);
+        await using (var blocked = NewDb(store)) Assert.True(await Processor(blocked).RunNextAsync(default));
+        store.Db.ChangeTracker.Clear();
+        var secondJob = await store.Db.ReviewCopyJobs.Include(j => j.Tracks).SingleAsync(j => j.Id != firstJob.Id);
+        Assert.Equal(oldPath, secondJob.Tracks.Single().DestinationPath);
+        Assert.Equal("destination_held_by_another_track", secondJob.Tracks.Single().FailureCode);
+
+        var receipt = await ReviewDestinationReleases.ReleaseAsync(store.Db, files, Owner, release, default);
+        Assert.Equal(new[] { firstJob.Id }, receipt.ReleasedJobIds);
+        Assert.Equal(new[] { first.Id }, receipt.ClearedPreviousSongIds);
+        Assert.Equal(JsonSerializer.Serialize(receipt), JsonSerializer.Serialize(
+            await ReviewDestinationReleases.ReleaseAsync(store.Db, files, Owner, release, default)));
+        Assert.Equal("request_key_reused", (await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewDestinationReleases.ReleaseAsync(
+            store.Db, files, Owner, release with { DestinationPath = oldPath + ".other" }, default))).Error.Code);
+        store.Db.ChangeTracker.Clear();
+        Assert.Null((await store.Db.Songs.SingleAsync(s => s.Id == first.Id)).PreviousDestinationPath);
+
+        await ReviewCopyJobs.RetryAsync(store.Db, Owner, secondJob.Id, default);
+        await using (var resumed = NewDb(store)) Assert.True(await Processor(resumed).RunNextAsync(default));
+        store.Db.ChangeTracker.Clear();
+        Assert.Equal("published", (await store.Db.ReviewCopyTracks.SingleAsync(t => t.JobId == secondJob.Id)).State);
+        Assert.Equal(oldPath, (await store.Db.Songs.SingleAsync(s => s.Id == second.Id)).DestinationPath);
+
+        var refused = await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewCopyRollback.RunAsync(store.Db, files, Owner, firstJob.Id, default));
+        Assert.Equal("destination_reservation_released", refused.Error.Code);
+        store.Db.ChangeTracker.Clear();
+        Assert.Equal("completed", (await store.Db.ReviewCopyJobs.SingleAsync(j => j.Id == firstJob.Id)).State);
+        Assert.Equal(oldPath, (await store.Db.Songs.SingleAsync(s => s.Id == second.Id)).DestinationPath);
+    }
+
+    [PostgresFact]
+    public async Task DestinationRelease_RefusesActiveSongsUnfinishedJobsAndUnreservedPaths()
+    {
+        await using var store = await Store.CreateAsync();
+        var song = await AddSong(store.Db);
+        var live = song.DestinationPath!;
+        File.Delete(live);
+        Assert.Equal("destination_in_use", (await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewDestinationReleases.ReleaseAsync(
+            store.Db, files, Owner, new(Guid.NewGuid(), live, "Test"), default))).Error.Code);
+        var nothing = Path.Combine(root, "nothing.flac");
+        Assert.Equal("reservation_not_found", (await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewDestinationReleases.ReleaseAsync(
+            store.Db, files, Owner, new(Guid.NewGuid(), nothing, "Test"), default))).Error.Code);
+        Assert.Equal("reason_required", (await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewDestinationReleases.ReleaseAsync(
+            store.Db, files, Owner, new(Guid.NewGuid(), nothing, " "), default))).Error.Code);
+
+        var previous = song.PreviousDestinationPath!;
+        var plan = await Plan(store.Db, [song], new { Genre = "Pending" });
+        await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, plan.Id, plan.Revision, default);
+        File.Delete(previous); // The queued job still records this path as its old previous path.
+        Assert.Equal("job_not_finished", (await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewDestinationReleases.ReleaseAsync(
+            store.Db, files, Owner, new(Guid.NewGuid(), previous, "Test"), default))).Error.Code);
+        Assert.Empty(await store.Db.ReviewDestinationReleases.ToArrayAsync());
+    }
+
     private async Task<SongMetadata> AddSong(MusicHoarderDbContext db, string fixture = "silence.flac", int number = 1)
     {
         Directory.CreateDirectory(Path.Combine(root, "source"));
