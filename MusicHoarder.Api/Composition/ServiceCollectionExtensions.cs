@@ -222,7 +222,10 @@ public static class ServiceCollectionExtensions
         });
         services.AddSingleton<IRuntimeSettingsService, RuntimeSettingsService>();
         services.AddSingleton<IEnrichmentOrchestrator, EnrichmentOrchestrator>();
-        services.AddSingleton<IDestinationPathResolver, DestinationPathResolver>();
+        services.AddSingleton<DestinationPathResolver>();
+        services.AddSingleton(sp => new CaseCanonicalDestinationPathResolver(
+            sp.GetRequiredService<DestinationPathResolver>(), sp.GetRequiredService<IOptions<MusicEnricherOptions>>()));
+        services.AddSingleton<IDestinationPathResolver>(sp => sp.GetRequiredService<CaseCanonicalDestinationPathResolver>());
         services.AddSingleton<IAlbumIdentityReconciler, AlbumIdentityReconciler>();
         services.AddScoped<IAlbumSplitHealer, AlbumSplitHealer>();
         services.AddScoped<IArtistCreditHealer, ArtistCreditHealer>();
