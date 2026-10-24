@@ -142,6 +142,47 @@ public class ArtistDuplicateServiceTests
     }
 
     [Fact]
+    public async Task Detect_RespectsDismissedSpellingsThatShareASearchKey()
+    {
+        // Bracketed disambiguation vanishes from the search key, so only the exact spellings can
+        // record that these are two bands.
+        await using var db = NewContext();
+        db.Songs.AddRange(
+            Song("/a/1.mp3", artist: "The Outsiders [USA]", artists: "The Outsiders [USA]"),
+            Song("/a/2.mp3", artist: "The Outsiders [Netherlands]", artists: "The Outsiders [Netherlands]"));
+        await db.SaveChangesAsync();
+        Assert.Single((await Service(db).DetectAsync(Owner)).Clusters);
+
+        var added = await Service(db).DismissAsync(Owner, ["The Outsiders [USA]", "The Outsiders [Netherlands]"]);
+        var report = await Service(db).DetectAsync(Owner);
+
+        Assert.Equal(1, added);
+        Assert.Empty(report.Clusters);
+    }
+
+    [Fact]
+    public async Task Detect_OmitsCombinedCreditsTheUserKeeps()
+    {
+        await using var db = NewContext();
+        db.Songs.AddRange(
+            Song("/a/1.mp3", artist: "Bob Marley & The Wailers", albumArtist: "Bob Marley & The Wailers"),
+            Song("/a/2.mp3", artist: "Bob Marley", artists: "Bob Marley"),
+            Song("/a/3.mp3", artist: "The Wailers", artists: "The Wailers"),
+            Song("/a/4.mp3", artist: "JAY-Z & Kanye West"),
+            Song("/a/5.mp3", artist: "JAY-Z", artists: "JAY-Z"),
+            Song("/a/6.mp3", artist: "Kanye West", artists: "Kanye West"));
+        await db.SaveChangesAsync();
+        Assert.Contains((await Service(db).DetectAsync(Owner)).CombinedCredits, c => c.Credit == "Bob Marley & The Wailers");
+
+        Assert.True(await Service(db).KeepCreditAsync(Owner, "Bob Marley & The Wailers"));
+        Assert.False(await Service(db).KeepCreditAsync(Owner, "Bob Marley & The Wailers"));
+        var report = await Service(db).DetectAsync(Owner);
+
+        Assert.DoesNotContain(report.CombinedCredits, c => c.Credit == "Bob Marley & The Wailers");
+        Assert.Contains(report.CombinedCredits, c => c.Credit == "JAY-Z & Kanye West");
+    }
+
+    [Fact]
     public async Task Detect_ReportsCombinedCreditCandidates()
     {
         await using var db = NewContext();

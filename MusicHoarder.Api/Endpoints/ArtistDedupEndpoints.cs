@@ -10,6 +10,8 @@ public record ArtistSplitCreditRequest(string CreditName);
 
 public record ArtistDismissRequest(string[] Names);
 
+public record ArtistKeepCreditRequest(string CreditName);
+
 /// <summary>
 /// Artist-level dedup: detect variant spellings of one artist ("JAY-Z" / "JAYZ" / "Jaÿ-z") and
 /// combined credits registered as a single artist ("JAY-Z &amp; Kanye West", an album artist of
@@ -38,6 +40,11 @@ public static class ArtistDedupEndpoints
         app.MapPost("/api/library/artists/dismiss", Dismiss)
             .WithName("DismissArtistDuplicates")
             .WithSummary("Mark artist-name spellings as NOT the same artist; the decision persists across detections.")
+            .WithTags("Library").RequireAdmin();
+
+        app.MapPost("/api/library/artists/keep-credit", KeepCredit)
+            .WithName("KeepArtistCredit")
+            .WithSummary("Keep a combined credit (\"Bob Marley & The Wailers\") as one artist; it is no longer offered for a split.")
             .WithTags("Library").RequireAdmin();
 
         return app;
@@ -97,5 +104,23 @@ public static class ArtistDedupEndpoints
 
         var added = await service.DismissAsync(currentUser.UserId, request.Names, ct);
         return Results.Ok(new { PairsDismissed = added });
+    }
+
+    internal static async Task<IResult> KeepCredit(
+        ArtistKeepCreditRequest request, IArtistDuplicateService service, ICurrentUserAccessor currentUser,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.CreditName))
+            return Results.BadRequest(new { message = "A credit name is required." });
+
+        try
+        {
+            var added = await service.KeepCreditAsync(currentUser.UserId, request.CreditName, ct);
+            return Results.Ok(new { Kept = true, Added = added });
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.BadRequest(new { message = ex.Message });
+        }
     }
 }

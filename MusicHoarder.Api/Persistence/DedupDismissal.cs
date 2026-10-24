@@ -7,6 +7,13 @@ public enum DedupDismissalKind
 
     /// <summary>Two album titles (under one artist) the user declared NOT the same album.</summary>
     AlbumPair = 1,
+
+    /// <summary>Two exact artist spellings the user declared NOT the same artist, kept even when they
+    /// normalize to one search key ("The Outsiders" / "The Outsiders [Netherlands]").</summary>
+    ArtistExactPair = 2,
+
+    /// <summary>A combined credit ("Bob Marley &amp; The Wailers") the user keeps as one artist.</summary>
+    CombinedCreditKept = 3,
 }
 
 /// <summary>

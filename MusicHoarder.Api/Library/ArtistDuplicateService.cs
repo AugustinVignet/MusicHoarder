@@ -61,6 +61,9 @@ public interface IArtistDuplicateService
 
     /// <summary>Records "these are not the same artist" for every pair among the given names.</summary>
     Task<int> DismissAsync(Guid ownerUserId, IReadOnlyList<string> names, CancellationToken ct = default);
+
+    /// <summary>Keep a combined credit as one artist: it stops being offered for a split.</summary>
+    Task<bool> KeepCreditAsync(Guid ownerUserId, string creditName, CancellationToken ct = default);
 }
 
 public sealed class ArtistDuplicateService(
@@ -75,6 +78,9 @@ public sealed class ArtistDuplicateService(
     {
         var songs = await QueryEligible(ownerUserId).AsNoTracking().ToListAsync(ct);
         var dismissed = await LoadDismissedPairsAsync(ownerUserId, ct);
+        var dismissedExact = await LoadDismissedPairsAsync(ownerUserId, ct, DedupDismissalKind.ArtistExactPair);
+        var keptCredits = (await LoadDismissedPairsAsync(ownerUserId, ct, DedupDismissalKind.CombinedCreditKept))
+            .Select(p => p.Low).ToHashSet(StringComparer.Ordinal);
 
         var stats = CollectNameStats(songs);
         var credits = CreditEvidence.Build(songs, stats.Keys);
@@ -98,7 +104,8 @@ public sealed class ArtistDuplicateService(
         {
             var (ka, kb) = (keyOf[a], keyOf[b]);
             var pair = string.CompareOrdinal(ka, kb) <= 0 ? (ka, kb) : (kb, ka);
-            return dismissed.Contains(pair);
+            var exact = string.CompareOrdinal(a, b) <= 0 ? (a, b) : (b, a);
+            return dismissed.Contains(pair) || dismissedExact.Contains(exact);
         }
 
         var threshold = options.Value.ArtistMergeFuzzyThreshold;
@@ -253,7 +260,7 @@ public sealed class ArtistDuplicateService(
                 .OrderByDescending(kv => kv.Value)
                 .ThenBy(kv => kv.Key, StringComparer.Ordinal)
                 .First().Key;
-            if (credits.OfferedParts(credit) is not { } parts)
+            if (keptCredits.Contains(key) || credits.OfferedParts(credit) is not { } parts)
                 continue;
             var plan = credits.PlanSplit(credit, rowsByKey[key]);
             if (plan.Count > 0)
@@ -492,12 +499,37 @@ public sealed class ArtistDuplicateService(
             .Distinct(StringComparer.Ordinal)
             .OrderBy(k => k, StringComparer.Ordinal)
             .ToList();
-        if (keys.Count < 2)
-            return 0;
-
-        var existing = await LoadDismissedPairsAsync(ownerUserId, ct);
+        var spellings = names
+            .Select(ArtistCreditNormalizer.NormalizeDisplayCredit)
+            .OfType<string>()
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
         var now = DateTime.UtcNow;
         var added = 0;
+
+        // Spellings that share one search key can only be told apart by their exact text; the
+        // normalized pair alone would collapse to one key and record nothing.
+        var existingExact = await LoadDismissedPairsAsync(ownerUserId, ct, DedupDismissalKind.ArtistExactPair);
+        for (var i = 0; i < spellings.Count; i++)
+        {
+            for (var j = i + 1; j < spellings.Count; j++)
+            {
+                if (existingExact.Contains((spellings[i], spellings[j])))
+                    continue;
+                db.DedupDismissals.Add(new DedupDismissal
+                {
+                    OwnerUserId = ownerUserId,
+                    Kind = DedupDismissalKind.ArtistExactPair,
+                    KeyLow = spellings[i],
+                    KeyHigh = spellings[j],
+                    CreatedAtUtc = now,
+                });
+                added++;
+            }
+        }
+
+        var existing = await LoadDismissedPairsAsync(ownerUserId, ct);
         for (var i = 0; i < keys.Count; i++)
         {
             for (var j = i + 1; j < keys.Count; j++)
@@ -521,6 +553,28 @@ public sealed class ArtistDuplicateService(
         return added;
     }
 
+    public async Task<bool> KeepCreditAsync(Guid ownerUserId, string creditName, CancellationToken ct = default)
+    {
+        var credit = ArtistCreditNormalizer.NormalizeDisplayCredit(creditName)
+            ?? throw new ArgumentException("A credit name is required.", nameof(creditName));
+        var key = TitleNormalizer.NormalizeArtistKey(credit);
+        if (key.Length == 0)
+            throw new ArgumentException("A credit name is required.", nameof(creditName));
+        var kept = await LoadDismissedPairsAsync(ownerUserId, ct, DedupDismissalKind.CombinedCreditKept);
+        if (kept.Contains((key, string.Empty)))
+            return false;
+        db.DedupDismissals.Add(new DedupDismissal
+        {
+            OwnerUserId = ownerUserId,
+            Kind = DedupDismissalKind.CombinedCreditKept,
+            KeyLow = key,
+            KeyHigh = string.Empty,
+            CreatedAtUtc = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+
     private IQueryable<SongMetadata> QueryEligible(Guid ownerUserId) => db.Songs
         .IgnoreQueryFilters()
         .Where(s => s.OwnerUserId == ownerUserId)
@@ -528,12 +582,12 @@ public sealed class ArtistDuplicateService(
         .ExcludingDemoTenant();
 
     private async Task<HashSet<(string Low, string High)>> LoadDismissedPairsAsync(
-        Guid ownerUserId, CancellationToken ct)
+        Guid ownerUserId, CancellationToken ct, DedupDismissalKind kind = DedupDismissalKind.ArtistPair)
     {
         var rows = await db.DedupDismissals
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(d => d.OwnerUserId == ownerUserId && d.Kind == DedupDismissalKind.ArtistPair)
+            .Where(d => d.OwnerUserId == ownerUserId && d.Kind == kind)
             .Select(d => new { d.KeyLow, d.KeyHigh })
             .ToListAsync(ct);
         return rows.Select(r => (r.KeyLow, r.KeyHigh)).ToHashSet();
