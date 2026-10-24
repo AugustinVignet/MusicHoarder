@@ -127,7 +127,7 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         }
         var probe = await runner.RunAsync(true,
             ["-v", "error", "-select_streams", "a", "-show_entries", "stream=index,codec_name,sample_rate,channels", "-of", "json", path], ct);
-        CheckCommand(probe);
+        CheckCommand(probe with { Errors = WithoutTagDiagnostics(probe.Errors) });
         var streams = ReadStreams(probe.Output);
         var common = new[] { "-nostdin", "-hide_banner", "-v", "error", "-xerror", "-err_detect", "explode", "-i", path, "-map", "0:a" };
         var tolerant = new[] { "-nostdin", "-hide_banner", "-v", "error", "-i", path, "-map", "0:a" };
@@ -207,12 +207,14 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         List<string> diagnostics, CancellationToken ct)
     {
         var result = await runner.RunAsync(false, [.. strict, .. output], ct);
+        result = result with { Errors = WithoutTagDiagnostics(result.Errors) };
         if (result.Failure is not null || result.Truncated || (result.ExitCode == 0 && string.IsNullOrWhiteSpace(result.Errors)))
         {
             CheckCommand(result);
             return result;
         }
         var relaxed = await runner.RunAsync(false, [.. tolerant, .. output], ct);
+        relaxed = relaxed with { Errors = WithoutTagDiagnostics(relaxed.Errors) };
         if (relaxed.Failure is not null) throw new AudioCheckException(relaxed.Failure);
         if (relaxed.Truncated) throw new AudioCheckException("tool_output_limit");
         if (relaxed.ExitCode != 0) throw new AudioCheckException("audio_tool_failed");
@@ -221,6 +223,22 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         diagnostics.AddRange(lines);
         return relaxed;
     }
+
+    /// <summary>ID3 parsing notices about the tag block (a mis-encoded comment frame, common in files
+    /// re-tagged by download sites). They concern metadata, not audio frames, so they neither
+    /// fail a check nor count as decode damage. Anything else on stderr still does.</summary>
+    private static readonly HashSet<string> TagOnlyDiagnostics = new(StringComparer.Ordinal)
+    {
+        "Incorrect BOM value",
+        "Error reading comment frame, skipped",
+    };
+
+    internal static string WithoutTagDiagnostics(string errors) =>
+        string.Join('\n', errors.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(line => !TagOnlyDiagnostics.Contains(ToolPrefix().Replace(line, ""))));
+
+    [GeneratedRegex(@"^\[[^\]]+ @ 0x[0-9a-fA-F]+\]\s*")]
+    private static partial Regex ToolPrefix();
 
     /// <summary>Removes per-process object addresses so identical damage yields identical text.</summary>
     internal static List<string> NormalizeDiagnostics(string errors) =>

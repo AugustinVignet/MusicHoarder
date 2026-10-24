@@ -147,6 +147,16 @@ public sealed class ReviewAudioVerifierTests : IDisposable
         Assert.Equal(15, runner.AudioCommands);
     }
 
+    [Fact]
+    public async Task TagOnlyId3Notices_AreNotAudioDamage()
+    {
+        var source = await Input("source", [1, 2, 3]); var copy = await Input("candidate", [4, 5, 6]);
+        var store = new ProofStore();
+        var result = await new ReviewAudioVerifier(new FakeRunner { Scenario = "id3-comment" }, store).VerifyAsync(source, copy);
+        Assert.True(result.Verified);
+        Assert.All(store.Proofs, p => Assert.Null(p.DecodeErrorsSha256));
+    }
+
     [Theory]
     [InlineData("encoded-exit", "audio_tool_failed")]
     [InlineData("decoded-exit", "audio_tool_failed")]
@@ -426,6 +436,7 @@ public sealed class ReviewAudioVerifierTests : IDisposable
     }
     private sealed class FakeRunner : IReviewAudioCommandRunner
     {
+        internal const string TagNotice = "Incorrect BOM value\n[id3v2 @ 0x7f00] Error reading comment frame, skipped\n";
         public string? Scenario { get; init; }
         public string ToolVersion { get; set; } = "synthetic-tool-version";
         public int AudioCommands { get; private set; }
@@ -440,8 +451,10 @@ public sealed class ReviewAudioVerifierTests : IDisposable
             {
                 var text = Scenario == "json" ? "not-json" : Scenario == "no-stream" ? "{\"streams\":[]}"
                     : $$"""{"streams":[{"index":0,"codec_name":"mp3","sample_rate":"44100","channels":{{(Scenario == "layout" && arguments.Last().EndsWith("candidate") ? 1 : 2)}}}]}""";
-                return Task.FromResult(new AudioCommandResult(0, text, ""));
+                return Task.FromResult(new AudioCommandResult(0, text, Scenario == "id3-comment" ? TagNotice : ""));
             }
+            if (Scenario == "id3-comment")
+                return Task.FromResult(new AudioCommandResult(0, $"0,a,SHA256={new string('a', 64)}\n", TagNotice));
             var decoding = arguments.Contains("pcm_s32le");
             if (decoding) OnDecode?.Invoke();
             if (decoding && arguments.Any(a => a.EndsWith("candidate"))) OnCandidateDecode?.Invoke();
