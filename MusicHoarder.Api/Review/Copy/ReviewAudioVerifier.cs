@@ -66,7 +66,7 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
     ReviewAudioMetrics? metrics = null, Action<ReviewAudioSnapshotObservation>? snapshotObserver = null,
     ReviewAudioSettle? candidateSettle = null)
 {
-    internal const string CodeVersion = "review-audio-v2-id3-boundaries";
+    internal const string CodeVersion = "review-audio-v3-mp3-payload-decode";
     private const string EmptySha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
     internal async Task<ReviewAudioResult> VerifyAsync(string source, string candidate, CancellationToken ct = default)
@@ -134,14 +134,24 @@ internal sealed partial class ReviewAudioVerifier(IReviewAudioCommandRunner runn
         var diagnostics = new List<string>();
         var encoded = await RunCheckedAsync(common, tolerant, ["-c:a", "copy", "-f", "streamhash", "-hash", "sha256", "-"], diagnostics, ct);
         var encodedHash = ReadHashes(encoded.Output, streams.Count);
+        string[] decodeStrict = common, decodeTolerant = tolerant;
         // Keep the strict demux check above, but exclude only physical boundary ID3 tags
         // for a single MP3 stream. Interior markers and unrecognized trailers stay hashed.
         if (streams is [{ Codec: "mp3" }] && Path.GetExtension(path).Equals(".mp3", StringComparison.OrdinalIgnoreCase))
+        {
             encodedHash = await ReviewMp3Payload.HashAsync(path, ct);
-        // Decode the ENTIRE file, with no resampling/channel folding or normalization.
+            // Decode that same payload: when the final frame is truncated, ffmpeg otherwise
+            // completes it with the trailing ID3v1 bytes, so a retag changes the decoded tail.
+            var (start, end) = await ReviewMp3Payload.RangeAsync(path, ct);
+            var payload = "subfile,,start," + start + ",end," + end + ",,:" + path;
+            // Both argument lists end with "-i", path, "-map", "0:a".
+            decodeStrict = [.. common[..^4], "-f", "mp3", "-i", payload, "-map", "0:a"];
+            decodeTolerant = [.. tolerant[..^4], "-f", "mp3", "-i", payload, "-map", "0:a"];
+        }
+        // Decode the ENTIRE payload, with no resampling/channel folding or normalization.
         // This catches invalid/truncated frames even when the demuxed payload can be hashed.
         if (metrics is not null) metrics.DecodeAttempts++;
-        var decoded = await RunCheckedAsync(common, tolerant, ["-c:a", "pcm_s32le", "-f", "streamhash", "-hash", "sha256", "-"], diagnostics, ct);
+        var decoded = await RunCheckedAsync(decodeStrict, decodeTolerant, ["-c:a", "pcm_s32le", "-f", "streamhash", "-hash", "sha256", "-"], diagnostics, ct);
         var decodedHash = ReadHashes(decoded.Output, streams.Count);
         var after = await SnapshotAsync(path, ct);
         snapshotObserver?.Invoke(new(path, "audio_inspection", before.Size, after.Size,

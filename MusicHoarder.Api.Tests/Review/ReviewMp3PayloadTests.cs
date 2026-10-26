@@ -45,6 +45,14 @@ public sealed class ReviewMp3PayloadTests : IDisposable
         Assert.NotEqual(await ReviewMp3Payload.HashAsync(source, default), await ReviewMp3Payload.HashAsync(notAtEnd, default));
     }
 
+    [Fact]
+    public async Task Range_IsExactlyTheHashedPayload()
+    {
+        var tag = Tag(3, false, 17);
+        var path = Write([.. tag, .. Payload, .. V1(5)]);
+        Assert.Equal(((long)tag.Length, (long)(tag.Length + Payload.Length)), await ReviewMp3Payload.RangeAsync(path, default));
+    }
+
     [Theory]
     [InlineData("version")]
     [InlineData("revision")]

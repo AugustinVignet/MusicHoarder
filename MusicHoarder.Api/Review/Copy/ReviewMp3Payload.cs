@@ -10,6 +10,32 @@ internal static class ReviewMp3Payload
     {
         await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
             65536, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var (start, end) = await RangeAsync(input, ct);
+
+        input.Position = start;
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[65536];
+        for (var remaining = end - start; remaining > 0;)
+        {
+            var count = (int)Math.Min(remaining, buffer.Length);
+            await input.ReadExactlyAsync(buffer.AsMemory(0, count), ct);
+            hash.AppendData(buffer.AsSpan(0, count));
+            remaining -= count;
+        }
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
+
+    /// <summary>The [start, end) byte range between the boundary ID3 tags, for decoding exactly
+    /// the hashed payload: a truncated final frame must not be completed with ID3v1 bytes.</summary>
+    internal static async Task<(long Start, long End)> RangeAsync(string path, CancellationToken ct)
+    {
+        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            4096, FileOptions.Asynchronous);
+        return await RangeAsync(input, ct);
+    }
+
+    private static async Task<(long Start, long End)> RangeAsync(FileStream input, CancellationToken ct)
+    {
         long start = 0, end = input.Length;
         var header = new byte[10];
         if (end >= 128)
@@ -46,18 +72,7 @@ internal static class ReviewMp3Payload
             start += length;
         }
         if (start >= end) Invalid();
-
-        input.Position = start;
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var buffer = new byte[65536];
-        for (var remaining = end - start; remaining > 0;)
-        {
-            var count = (int)Math.Min(remaining, buffer.Length);
-            await input.ReadExactlyAsync(buffer.AsMemory(0, count), ct);
-            hash.AppendData(buffer.AsSpan(0, count));
-            remaining -= count;
-        }
-        return Convert.ToHexStringLower(hash.GetHashAndReset());
+        return (start, end);
     }
 
     private static void Invalid() => throw new ReviewAudioVerifier.AudioCheckException("invalid_mp3_metadata_boundary");

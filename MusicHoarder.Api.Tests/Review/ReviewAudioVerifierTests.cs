@@ -241,6 +241,36 @@ public sealed class ReviewAudioVerifierTests : IDisposable
         Assert.False(refused.Verified);
     }
 
+    [AudioToolsFact]
+    public async Task ActualMp3WhoseLastFrameRunsIntoId3v1_RetaggedCopyIsVerified()
+    {
+        var encoded = Path.Combine(root, "encoded.mp3");
+        var source = Path.Combine(root, "overlap.mp3"); var candidate = Path.Combine(root, "candidate.mp3");
+        var runner = new ReviewAudioCommandRunner(AudioTools.Ffmpeg!);
+        var generated = await runner.ExecuteAsync(false,
+            ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "anoisesrc=color=pink:sample_rate=44100:seed=7", "-t", "5", "-c:a", "libmp3lame", "-b:a", "160k", encoded], default);
+        Assert.Equal(0, generated.ExitCode);
+        var bytes = await File.ReadAllBytesAsync(encoded);
+        byte[] V1(string title) => [.. "TAG"u8, .. System.Text.Encoding.ASCII.GetBytes(title.PadRight(30)), .. new byte[95]];
+        async Task<string> FullFileDecode(string path) => (await runner.ExecuteAsync(false,
+            ["-nostdin", "-v", "error", "-i", path, "-map", "0:a", "-c:a", "pcm_s32le", "-f", "streamhash", "-hash", "sha256", "-"], default)).Output;
+        // A truncated download tagged afterwards: the ID3v1 tag lands inside the last frame's
+        // declared length. Search for a cut where ffmpeg decodes those tag bytes as audio.
+        var overlapping = false;
+        for (var cut = 200; cut <= 4000 && !overlapping; cut += 100)
+        {
+            await File.WriteAllBytesAsync(source, [.. bytes[..^cut], .. V1("Original title")]);
+            await File.WriteAllBytesAsync(candidate, [.. bytes[..^cut], .. V1("Corrected title")]);
+            overlapping = await FullFileDecode(source) != await FullFileDecode(candidate);
+        }
+        Assert.True(overlapping, "fixture must reproduce a final frame completed with ID3v1 bytes");
+        var song = ReviewCopyTagRetagTests.Song();
+        await new TagLibLibraryTagWriter().WriteTagsAsync(candidate, song, AlbumIdentity.FromSong(song));
+        var result = await new ReviewAudioVerifier(runner).VerifyAsync(source, candidate);
+        Assert.True(result.Verified, $"{result.FailedStage}:{result.FailureCode}");
+        Assert.Equal(result.Source!.DecodedAudioSha256, result.Candidate!.DecodedAudioSha256);
+    }
+
     [Fact]
     public async Task MutationDuringVerification_AndMissingFile_AreNotSuccessfulProofs()
     {
