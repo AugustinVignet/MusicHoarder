@@ -578,6 +578,9 @@ public sealed class ReviewCopyJobTests : IDisposable
         File.Delete(live);
         Assert.Equal("destination_in_use", (await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewDestinationReleases.ReleaseAsync(
             store.Db, files, Owner, new(Guid.NewGuid(), live, "Test"), default))).Error.Code);
+        // The song itself, whose file is gone, is not an occupant when it is the track to republish.
+        Assert.Equal("reservation_not_found", (await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewDestinationReleases.ReleaseAsync(
+            store.Db, files, Owner, new(Guid.NewGuid(), live, "Test", song.Id), default))).Error.Code);
         var nothing = Path.Combine(root, "nothing.flac");
         Assert.Equal("reservation_not_found", (await Assert.ThrowsAsync<ReviewPlanException>(() => ReviewDestinationReleases.ReleaseAsync(
             store.Db, files, Owner, new(Guid.NewGuid(), nothing, "Test"), default))).Error.Code);

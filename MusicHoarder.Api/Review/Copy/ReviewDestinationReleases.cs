@@ -31,7 +31,8 @@ internal static class ReviewDestinationReleases
             ?? throw Error(409, "writer_busy", "A library writer is active. Retry later; nothing was released.");
         if (files.File.Exists(path)) throw Error(409, "destination_file_present", "A file still exists at this path; nothing was released.");
         var inUse = await db.Songs.IgnoreQueryFilters().AnyAsync(s => s.DeletedAtUtc == null
-            && s.DestinationPath != null && s.DestinationPath.ToLower() == folded, ct);
+            && s.DestinationPath != null && s.DestinationPath.ToLower() == folded
+            && (request.ForSongId == null || s.Id != request.ForSongId || s.OwnerUserId != owner), ct);
         if (inUse) throw Error(409, "destination_in_use", "An active song is built at this path; nothing was released.");
         var tracks = await db.ReviewCopyTracks.Where(t => t.DestinationPath.ToLower() == folded || t.BackupPath.ToLower() == folded
             || (t.OldDestinationPath != null && t.OldDestinationPath.ToLower() == folded)
