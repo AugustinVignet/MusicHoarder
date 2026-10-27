@@ -1,10 +1,13 @@
+# Scheduled version updates are paused to avoid unattended PR and CI runs.
+# Restore a positive open-pull-requests-limit for an ecosystem to resume it.
+# Security updates remain governed by the repository settings.
 version: 2
 updates:
   - package-ecosystem: 'bun'
     directory: '/frontend'
     schedule:
       interval: 'weekly'
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0
     # Defense against supply-chain attacks (e.g. Shai-Hulud): only propose
     # versions that have been published long enough for the registry/community
     # to catch and yank malicious releases. Security advisories from GitHub's
@@ -82,6 +85,7 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
+    open-pull-requests-limit: 0
     # github-actions ecosystem only supports `default-days` for cooldown
     # (no per-semver-level fields).
     cooldown:
@@ -104,7 +108,7 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 5
       semver-major-days: 7
