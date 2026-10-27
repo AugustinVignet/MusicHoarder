@@ -1,14 +1,12 @@
 # Safety-net reaper for orphaned PR preview stacks.
 #
 # The pr-preview.yml `teardown` job normally deletes a preview when its PR closes. If that event is
-# ever missed (workflow disabled, transient Dokploy error, manual compose created), this daily job
+# ever missed (workflow disabled, transient Dokploy error, manual compose created), this manual workflow
 # enumerates pr-<n> composes in the previews environment and destroys any whose PR is no longer
-# open. Also runnable on demand.
+# open. Run it on demand; scheduled execution is disabled.
 name: PR preview cleanup (Dokploy)
 
 on:
-  schedule:
-    - cron: "17 4 * * *" # daily, 04:17 UTC
   workflow_dispatch:
 
 permissions:
@@ -56,7 +54,7 @@ jobs:
             else
               echo "PR #${pr} state=${state} — destroying ${name}."
               # Don't let one transient destroy failure abort the whole sweep — log and move on;
-              # the still-orphaned stack gets retried on the next daily run.
+              # the still-orphaned stack gets retried on the next manual run.
               PR="$pr" ./scripts/dokploy-preview.sh destroy \
                 || echo "::warning::failed to destroy ${name}; will retry on the next run."
               # Drop the stale "preview" label if the close-event teardown missed it. Best-effort.
