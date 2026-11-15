@@ -377,6 +377,75 @@ public sealed class ReviewCopyJobTests : IDisposable
         Assert.True(restored.IsDuplicate); Assert.Equal(keeper.Id, restored.DuplicateOfId);
     }
 
+    // Second row at the keeper's exact slot and planned path, without any recorded copy.
+    private async Task<(SongMetadata Keeper, SongMetadata Copy)> SameSlotPair(MusicHoarderDbContext db, bool duplicate)
+    {
+        var keeper = await AddSong(db, number: 1); var copy = await AddSong(db, number: 2);
+        File.Delete(copy.DestinationPath!); File.Delete(copy.PreviousDestinationPath!);
+        copy.TrackNumber = 1; copy.DestinationPath = null; copy.PreviousDestinationPath = null;
+        copy.LibraryBuildStatus = LibraryBuildStatus.Pending;
+        if (duplicate) { copy.IsDuplicate = true; copy.DuplicateOfId = keeper.Id; }
+        await db.SaveChangesAsync();
+        Assert.Equal(Resolver.ResolvePath(keeper), Resolver.ResolvePath(copy));
+        return (keeper, copy);
+    }
+
+    [PostgresTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DuplicateMarkedRowAtSameSlot_DoesNotBlockItsKeeper_ButTwoLiveRowsStillDo(bool duplicate)
+    {
+        await using var store = await Store.CreateAsync();
+        var (keeper, copy) = await SameSlotPair(store.Db, duplicate);
+        var plan = await Plan(store.Db, [keeper], new { Genre = "Reviewed" });
+        Assert.Equal(duplicate, plan.CanApply);
+        if (!duplicate)
+        {
+            Assert.Contains(plan.Conflicts, c => c.Kind == "destinationPath" && c.SongIds.SequenceEqual(new[] { keeper.Id, copy.Id }));
+            Assert.Contains(plan.Conflicts, c => c.Kind is "albumPosition" or "possibleAlbumPosition" && c.SongIds.Contains(copy.Id));
+            Assert.DoesNotContain(plan.Conflicts, c => c.Kind == "duplicateMarkedRetained");
+            return;
+        }
+        Assert.Equal(2, plan.Conflicts.Count(c => c.Kind == "duplicateMarkedRetained" && c.SongIds.SequenceEqual(new[] { keeper.Id, copy.Id })));
+        Assert.DoesNotContain(plan.Conflicts, c => c.Kind is "destinationPath" or "albumPosition" or "possibleAlbumPosition" or "destinationHeldByDuplicate");
+        await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, plan.Id, plan.Revision, default);
+        await Processor(store.Db).RunNextAsync(default);
+        Assert.Equal("completed", (await store.Db.ReviewCopyJobs.SingleAsync()).State);
+        var retired = await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == copy.Id);
+        Assert.True(retired.IsDuplicate); Assert.Equal(keeper.Id, retired.DuplicateOfId);
+        Assert.Null(retired.DestinationPath); Assert.Null(retired.ReviewPlanId);
+    }
+
+    [PostgresFact]
+    public async Task DuplicateStillRecordingThePlannedPath_BlocksPreview_InsteadOfFailingInCopy()
+    {
+        await using var store = await Store.CreateAsync();
+        var (keeper, copy) = await SameSlotPair(store.Db, duplicate: true);
+        copy.DestinationPath = keeper.DestinationPath; copy.LibraryBuildStatus = LibraryBuildStatus.Done;
+        await store.Db.SaveChangesAsync();
+        var plan = await Plan(store.Db, [keeper], new { Genre = "Reviewed" });
+        Assert.False(plan.CanApply);
+        var held = Assert.Single(plan.Conflicts, c => c.Kind == "destinationHeldByDuplicate");
+        Assert.Equal(new[] { keeper.Id, copy.Id }, held.SongIds.ToArray());
+        Assert.Equal("plan_conflicts", (await Assert.ThrowsAsync<ReviewPlanException>(() =>
+            ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, plan.Id, plan.Revision, default))).Error.Code);
+        Assert.Empty(await store.Db.ReviewCopyJobs.ToArrayAsync());
+    }
+
+    [PostgresFact]
+    public async Task PreservedDuplicateAtItsKeepersSlot_StillConflicts()
+    {
+        await using var store = await Store.CreateAsync();
+        var (keeper, copy) = await SameSlotPair(store.Db, duplicate: true);
+        var scope = new AlbumReviewContextRequest([Path.Combine(root, "source")], [copy.Id]);
+        var context = await AlbumReviewContextReader.ReadAsync(store.Db, files, Owner, scope, default);
+        var plan = await ReviewPlanService.PreviewAsync(store.Db, files, Resolver, Owner, new(scope, context.Revision,
+            "Preserve explicit album slot", ["fixture:membership"], [new(copy.Id, false, new(), true)]), default);
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Conflicts, c => c.Kind == "destinationPath" && c.SongIds.SequenceEqual(new[] { keeper.Id, copy.Id }));
+        Assert.DoesNotContain(plan.Conflicts, c => c.Kind == "duplicateMarkedRetained");
+    }
+
     [PostgresFact]
     public async Task SourceContentChangedBeforeApply_EvenWithSameStat_RequiresNewPreview()
     {

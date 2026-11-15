@@ -142,6 +142,14 @@ produce `distinctEditionsRetained`; these warnings permit both slots. Otherwise
 albumPosition/possibleAlbumPosition remains a blocker, including unknown-disc
 versus disc 1. Colliding destinations always block regardless of dismissal.
 
+A row already marked duplicate (`isDuplicate`, not preserved by the same plan)
+is never built or published, so it no longer blocks the path or position of a
+non-duplicate track: such a collision is reported as `duplicateMarkedRetained`
+and permits the plan. Two non-duplicate rows still block as above. When that
+duplicate still records the planned path as its current or previous destination,
+stage C would refuse the copy (`destination_held_by_another_track`); the preview
+reports `destinationHeldByDuplicate` and stays blocked instead.
+
 Rollback persists rollingBack intent, restores verified backup bytes while
 retaining the replacement, then restores metadata and marks plan audit reverted
 in one retryable transaction. The hosted worker resumes interrupted rollbacks.

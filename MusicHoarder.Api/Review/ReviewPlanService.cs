@@ -228,10 +228,17 @@ internal static class ReviewPlanService
                 values[field] = value.ValueKind == JsonValueKind.Null ? null : ReviewFields.Get(song, field);
             return t with { Current = t.Current with { Values = values }, Copy = t.Copy with { Path = paths[t.Id] } };
         }).ToArray();
+        // A row already marked duplicate (and not preserved by this plan) is never built or
+        // published, so it cannot claim the path or album position of a non-duplicate track.
+        // Two non-duplicate rows still conflict exactly as before.
+        var preserved = request.Tracks.Where(t => t.PreserveAlbumMembership).Select(t => t.SongId).ToHashSet();
+        var retiredDuplicates = songs.Where(s => s.IsDuplicate && !preserved.Contains(s.Id)).Select(s => s.Id).ToHashSet();
         var conflicts = AlbumReviewContextReader.Conflicts(final).Select(conflict =>
         {
+            if (conflict.SongIds.Count(s => !retiredDuplicates.Contains(s)) < 2)
+                return conflict with { Kind = "duplicateMarkedRetained" };
             if (conflict.Kind is not ("albumPosition" or "possibleAlbumPosition")) return conflict;
-            var members = songs.Where(s => conflict.SongIds.Contains(s.Id)).ToArray();
+            var members = songs.Where(s => conflict.SongIds.Contains(s.Id) && !retiredDuplicates.Contains(s.Id)).ToArray();
             var separatePaths = members.Select(s => paths[s.Id]).Distinct(StringComparer.OrdinalIgnoreCase).Count() == members.Length;
             var allDismissed = members.All(a => members.Where(b => b.Id != a.Id).All(b => context.Duplicates.Any(d =>
                 d.Status == "Dismissed" && (d.SongIdLow == Math.Min(a.Id, b.Id) && d.SongIdHigh == Math.Max(a.Id, b.Id)))));
@@ -252,6 +259,14 @@ internal static class ReviewPlanService
                         && files.File.Exists(t.Copy.Path!)
                         && ReviewCopyJobs.HashIfPresent(files, t.Copy.Path!) == ReviewCopyJobs.HashIfPresent(files, track.PlannedPath))))
                 conflicts.Add(new("destinationOccupiedOrUnknown", track.PlannedPath, [track.SongId]));
+            // Stage C refuses a destination still recorded by any other row, duplicates included.
+            // Say so here instead of applying metadata whose copy can only fail afterwards.
+            var holders = songs.Where(s => retiredDuplicates.Contains(s.Id)
+                && (string.Equals(s.DestinationPath, track.PlannedPath, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(s.PreviousDestinationPath, track.PlannedPath, StringComparison.OrdinalIgnoreCase)))
+                .Select(s => s.Id).Order().ToArray();
+            if (holders.Length > 0)
+                conflicts.Add(new("destinationHeldByDuplicate", track.PlannedPath, [track.SongId, .. holders]));
         }
         var fingerprints = tracks.SelectMany(t => new[] { t.PlannedPath, songs.Single(s => s.Id == t.SongId).SourcePath,
                 songs.Single(s => s.Id == t.SongId).DestinationPath, songs.Single(s => s.Id == t.SongId).PreviousDestinationPath })
@@ -264,7 +279,7 @@ internal static class ReviewPlanService
         if (fingerprints.Any(f => f.Presence == "unavailable"))
             conflicts.Add(new("fileFingerprintUnavailable", "selectedFiles", request.Tracks.Select(t => t.SongId).ToArray()));
         var preview = new ReviewPlanPreview(id, "", context.Revision, tracks, contextIds, conflicts,
-            !conflicts.Any(c => c.Kind is not ("distinctTakesRetained" or "distinctEditionsRetained")
+            !conflicts.Any(c => c.Kind is not ("distinctTakesRetained" or "distinctEditionsRetained" or "duplicateMarkedRetained")
                 && c.SongIds.Any(s => request.Tracks.Any(t => t.SongId == s))), CopyState, observations, "exact-verified-copy-v2", fingerprints);
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new { request, preview }, Json);
         if (bytes.Length > AlbumReviewContextReader.MaxResponseBytes)
