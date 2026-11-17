@@ -5,6 +5,9 @@ using MusicHoarder.Api.Persistence;
 
 namespace MusicHoarder.Api.Tests.Endpoints;
 
+// Resolving a loser bound to a review plan takes the publication gate, whose in-memory fallback is
+// process-wide: never run alongside the in-memory builder tests that hold it.
+[Collection(ReviewPublicationGateCollection.Name)]
 public class DuplicatesEndpointsTests
 {
     private static readonly Guid Owner = WellKnownUsers.OwnerId;
@@ -66,6 +69,95 @@ public class DuplicatesEndpointsTests
         AssertStatus(result, 404);
     }
 
+    [Theory]
+    [InlineData("completed")]
+    [InlineData("needsAttention")]
+    [InlineData("rolledBack")]
+    public async Task Resolve_LoserWithSettledReviewPlan_IsMarked_KeepingPlanAndApproval(string jobState)
+    {
+        var options = CreateOptions();
+        await using var db = new MusicHoarderDbContext(options, new StubCurrentUser(Owner));
+        var loser = CreateSong(1, "/a/track.mp3");
+        var planId = AddReviewedPlan(db, loser, applied: true, jobState);
+        db.Songs.AddRange(loser, CreateSong(2, "/b/track.flac"));
+        await db.SaveChangesAsync();
+
+        var result = await DuplicatesEndpoints.Resolve(new DuplicateResolveRequest(2, [1]), db, CancellationToken.None);
+
+        AssertStatus(result, 200);
+        var marked = await db.Songs.SingleAsync(s => s.Id == 1);
+        Assert.True(marked.IsDuplicate);
+        Assert.Equal(2, marked.DuplicateOfId);
+        Assert.Equal(planId, marked.ReviewPlanId);
+        Assert.True(marked.IsManuallyApproved);
+        Assert.NotNull(marked.ManuallyApprovedAtUtc);
+    }
+
+    [Theory]
+    [InlineData(false, "completed", "review_plan_not_applied")]
+    [InlineData(true, "pending", "review_copy_job_unfinished")]
+    [InlineData(true, "running", "review_copy_job_unfinished")]
+    [InlineData(true, "rollingBack", "review_copy_job_unfinished")]
+    [InlineData(true, null, "review_copy_job_missing")]
+    public async Task Resolve_LoserWhosePlanStillOwnsIt_IsRefusedAndNothingChanges(bool applied, string? jobState, string reason)
+    {
+        var options = CreateOptions();
+        await using var db = new MusicHoarderDbContext(options, new StubCurrentUser(Owner));
+        var owned = CreateSong(1, "/a/track.mp3");
+        AddReviewedPlan(db, owned, applied, jobState);
+        var plain = CreateSong(3, "/c/track.mp3");
+        db.Songs.AddRange(owned, CreateSong(2, "/b/track.flac"), plain);
+        await db.SaveChangesAsync();
+
+        var result = await DuplicatesEndpoints.Resolve(new DuplicateResolveRequest(2, [1, 3]), db, CancellationToken.None);
+
+        AssertStatus(result, 409);
+        Assert.Equal(reason, Assert.Single(BlockedReasons(result)).Reason);
+        Assert.Equal(1, Assert.Single(BlockedReasons(result)).SongId);
+        // All or nothing: the unguarded loser and the keeper pin are not written either.
+        var songs = await db.Songs.AsNoTracking().OrderBy(s => s.Id).ToListAsync();
+        Assert.All(songs, s => Assert.False(s.IsDuplicate));
+        Assert.Null(songs[1].DuplicateKeeperPinnedAtUtc);
+    }
+
+    [Fact]
+    public async Task Resolve_AutomationHeldLoser_IsRefused_HoldIsNotLifted()
+    {
+        var options = CreateOptions();
+        await using var db = new MusicHoarderDbContext(options, new StubCurrentUser(Owner));
+        var held = CreateSong(1, "/a/track.mp3");
+        AddReviewedPlan(db, held, applied: true, "completed");
+        held.AutomationHeld = true;
+        db.Songs.AddRange(held, CreateSong(2, "/b/track.flac"));
+        await db.SaveChangesAsync();
+
+        var result = await DuplicatesEndpoints.Resolve(new DuplicateResolveRequest(2, [1]), db, CancellationToken.None);
+
+        AssertStatus(result, 409);
+        Assert.Equal(new DuplicateResolveBlock(1, "automation_held"), Assert.Single(BlockedReasons(result)));
+        var stored = await db.Songs.AsNoTracking().SingleAsync(s => s.Id == 1);
+        Assert.False(stored.IsDuplicate);
+        Assert.True(stored.AutomationHeld);
+    }
+
+    [Fact]
+    public async Task Resolve_ReplayOfAnAppliedDecision_IsIdempotent()
+    {
+        var options = CreateOptions();
+        await using var db = new MusicHoarderDbContext(options, new StubCurrentUser(Owner));
+        var loser = CreateSong(1, "/a/track.mp3");
+        AddReviewedPlan(db, loser, applied: true, "completed");
+        db.Songs.AddRange(loser, CreateSong(2, "/b/track.flac"));
+        await db.SaveChangesAsync();
+
+        AssertStatus(await DuplicatesEndpoints.Resolve(new DuplicateResolveRequest(2, [1]), db, CancellationToken.None), 200);
+        // A later hold does not turn an identical replay into a refusal.
+        (await db.Songs.SingleAsync(s => s.Id == 1)).AutomationHeld = true;
+        await db.SaveChangesAsync();
+        AssertStatus(await DuplicatesEndpoints.Resolve(new DuplicateResolveRequest(2, [1]), db, CancellationToken.None), 200);
+        Assert.Equal(2, (await db.Songs.AsNoTracking().SingleAsync(s => s.Id == 1)).DuplicateOfId);
+    }
+
     [Fact]
     public async Task Dismiss_CreatesDismissedLinks_AndClearsInSetFlags()
     {
@@ -117,6 +209,32 @@ public class DuplicatesEndpointsTests
         AssertStatus(result, 400);
     }
 
+    private static Guid AddReviewedPlan(MusicHoarderDbContext db, SongMetadata song, bool applied, string? jobState)
+    {
+        var plan = new ReviewPlan
+        {
+            Id = Guid.NewGuid(), OwnerUserId = Owner, ActorUserId = Owner, CreatedAtUtc = DateTime.UtcNow,
+            Revision = "r1", AppliedAtUtc = applied ? DateTime.UtcNow : null,
+        };
+        db.ReviewPlans.Add(plan);
+        if (jobState is not null)
+            db.ReviewCopyJobs.Add(new ReviewCopyJob
+            {
+                Id = Guid.NewGuid(), OwnerUserId = Owner, PlanId = plan.Id, RequestId = Guid.NewGuid(), Revision = "r1",
+                State = jobState, CreatedAtUtc = DateTime.UtcNow, UpdatedAtUtc = DateTime.UtcNow,
+            });
+        song.LockManualApproval();
+        song.ReviewPlanId = plan.Id;
+        return plan.Id;
+    }
+
+    private static IReadOnlyList<DuplicateResolveBlock> BlockedReasons(Microsoft.AspNetCore.Http.IResult result)
+    {
+        var value = Assert.IsAssignableFrom<Microsoft.AspNetCore.Http.IValueHttpResult>(result).Value!;
+        Assert.Equal("duplicates_not_marked", value.GetType().GetProperty("code")?.GetValue(value));
+        return Assert.IsAssignableFrom<IReadOnlyList<DuplicateResolveBlock>>(value.GetType().GetProperty("Blocked")!.GetValue(value));
+    }
+
     private static void AssertStatus(Microsoft.AspNetCore.Http.IResult result, int expected)
     {
         var status = Assert.IsAssignableFrom<Microsoft.AspNetCore.Http.IStatusCodeHttpResult>(result);
@@ -146,4 +264,10 @@ public class DuplicatesEndpointsTests
         public CurrentUser? User { get; } = new(userId, "owner@test", UserRole.Admin, "Owner");
         public Guid UserId => userId;
     }
+}
+
+[CollectionDefinition(Name)]
+public sealed class ReviewPublicationGateCollection
+{
+    public const string Name = "Review publication gate (in-memory)";
 }

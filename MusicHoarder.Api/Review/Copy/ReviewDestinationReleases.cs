@@ -10,8 +10,6 @@ namespace MusicHoarder.Api.Review.Copy;
 /// A released job keeps its history but can no longer be rolled back onto that path.</summary>
 internal static class ReviewDestinationReleases
 {
-    private static readonly string[] UnfinishedStates = ["pending", "running", "rollingBack"];
-
     internal static async Task<ReviewDestinationReleaseResult> ReleaseAsync(MusicHoarderDbContext db, IFileSystem files,
         Guid owner, ReviewDestinationReleaseRequest request, CancellationToken ct)
     {
@@ -44,7 +42,7 @@ internal static class ReviewDestinationReleases
             .Select(t => t.JobId).Distinct().Order().ToList();
         var jobs = await db.ReviewCopyJobs.IgnoreQueryFilters().Where(j => jobIds.Contains(j.Id)).ToListAsync(ct);
         if (jobs.Any(j => j.OwnerUserId != owner)) throw Error(409, "foreign_reservation", "Another owner's job reserves this path.");
-        if (jobs.Any(j => UnfinishedStates.Contains(j.State))) throw Error(409, "job_not_finished", "A review copy using this path is not finished.");
+        if (jobs.Any(j => ReviewPlanSettlement.UnfinishedJobStates.Contains(j.State))) throw Error(409, "job_not_finished", "A review copy using this path is not finished.");
         var previous = await db.Songs.IgnoreQueryFilters().Where(s => s.DeletedAtUtc == null
             && s.PreviousDestinationPath != null && s.PreviousDestinationPath.ToLower() == folded).ToListAsync(ct);
         if (previous.Any(s => s.OwnerUserId != owner)) throw Error(409, "foreign_reservation", "Another owner's song reserves this path.");

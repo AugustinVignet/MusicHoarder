@@ -674,8 +674,10 @@ public class LibraryBuilderService(
         var occupants = (await db.Songs
                 .IgnoreQueryFilters()
                 .AsNoTracking()
-                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic && (!s.IsDuplicate || s.ReviewPlanId != null || s.AutomationHeld)
+                .Where(s => s.DeletedAtUtc == null && !s.IsSynthetic
                     && s.DestinationPath != null && resolvedPaths.Contains(s.DestinationPath))
+                // A duplicate the owner resolved after its review copy settled no longer claims the path.
+                .Where(Review.Copy.ReviewPlanSettlement.ClaimsBuiltDestination(db))
                 .ToListAsync(ct))
             .Where(s => !batchIds.Contains(s.Id))
             .GroupBy(s => s.DestinationPath!, StringComparer.Ordinal)
@@ -829,6 +831,9 @@ public class LibraryBuilderService(
                     && s.LibraryBuildStatus == LibraryBuildStatus.Done
                     && s.DestinationPath != null && s.DestinationPath.StartsWith(folderPrefix)
                     && s.TrackNumber != null)
+                // An owner-resolved duplicate of a settled review no longer represents its slot: its keeper
+                // must not be flagged a duplicate of the copy it replaces.
+                .Where(Review.Copy.ReviewPlanSettlement.ClaimsBuiltPosition(db))
                 .ToListAsync(ct);
             foreach (var occupant in occupants.Where(o => Path.GetDirectoryName(o.DestinationPath) == folder))
             {
@@ -1012,7 +1017,8 @@ public class LibraryBuilderService(
         var occupantId = await db.Songs
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(s => s.Id != songId && s.DeletedAtUtc == null && (!s.IsDuplicate || s.ReviewPlanId != null || s.AutomationHeld)
+            .Where(Review.Copy.ReviewPlanSettlement.ClaimsBuiltDestination(db))
+            .Where(s => s.Id != songId && s.DeletedAtUtc == null
                 && (s.DestinationPath == destinationPath
                     || ((s.ReviewPlanId != null || s.AutomationHeld) && s.PreviousDestinationPath == destinationPath)))
             .Select(s => (int?)s.Id)

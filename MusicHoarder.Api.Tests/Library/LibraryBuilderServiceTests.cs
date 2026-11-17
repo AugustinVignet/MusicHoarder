@@ -14,6 +14,7 @@ using System.Text.Json;
 
 namespace MusicHoarder.Api.Tests.Library;
 
+[Collection(MusicHoarder.Api.Tests.Endpoints.ReviewPublicationGateCollection.Name)]
 public class LibraryBuilderServiceTests
 {
     [Fact]
@@ -1778,6 +1779,52 @@ public class LibraryBuilderServiceTests
         Assert.False(held.IsDuplicate); Assert.False(candidate.IsDuplicate);
         Assert.Equal(LibraryBuildStatus.AwaitingReviewBuild, held.LibraryBuildStatus);
         Assert.Equal(1990, held.Year);
+    }
+
+    [Theory]
+    [InlineData("completed", false)]
+    [InlineData("needsAttention", false)]
+    [InlineData("running", false)]
+    [InlineData("completed", true)]
+    public async Task DuplicateResolvedAfterSettledReview_NoLongerClaimsItsPath_ButReservationsStillGuardIt(
+        string jobState, bool reservationKept)
+    {
+        var destination = "/dest/Artist/2026 - Album/01 - Track.mp3";
+        // The loser's published file was set aside; only the keeper's source remains.
+        var fs = new MockFileSystem(new Dictionary<string, MockFileData> { ["/source/new.mp3"] = new("NEW-CANDIDATE") });
+        await using var db = CreateDbContext();
+        var keeper = CreateMatchedSong("/source/new.mp3", 13);
+        db.Songs.Add(keeper); await db.SaveChangesAsync();
+        var plan = new ReviewPlan { Id = Guid.NewGuid(), OwnerUserId = keeper.OwnerUserId, ActorUserId = keeper.OwnerUserId,
+            CreatedAtUtc = DateTime.UtcNow, Revision = "r1", AppliedAtUtc = DateTime.UtcNow };
+        var job = new ReviewCopyJob { Id = Guid.NewGuid(), OwnerUserId = keeper.OwnerUserId, PlanId = plan.Id, RequestId = Guid.NewGuid(),
+            Revision = "r1", State = jobState, CreatedAtUtc = DateTime.UtcNow, UpdatedAtUtc = DateTime.UtcNow };
+        var loser = CreateMatchedSong("/source/old.mp3", 8, libraryBuildStatus: LibraryBuildStatus.Done);
+        loser.LockManualApproval(); loser.ReviewPlanId = plan.Id; loser.DestinationPath = destination;
+        loser.IsDuplicate = true; loser.DuplicateOfId = keeper.Id;
+        db.ReviewPlans.Add(plan); db.ReviewCopyJobs.Add(job); db.Songs.Add(loser);
+        if (reservationKept)
+            db.ReviewCopyTracks.Add(new ReviewCopyTrack { JobId = job.Id, SongId = loser.Id, State = "published",
+                DestinationPath = destination, UpdatedAtUtc = DateTime.UtcNow });
+        await db.SaveChangesAsync();
+
+        var result = await CreateService(db, fs, new RecordingTagWriter()).ProcessNextBatchAsync(Guid.NewGuid());
+        var built = await db.Songs.AsNoTracking().SingleAsync(s => s.Id == keeper.Id);
+
+        if (jobState != "running" && !reservationKept)
+        {
+            Assert.Equal(1, result.Done);
+            Assert.Equal(destination, built.DestinationPath);
+            Assert.Equal("NEW-CANDIDATE", fs.File.ReadAllText(destination));
+        }
+        else
+        {
+            Assert.Equal(0, result.Done);
+            Assert.False(fs.File.Exists(destination));
+            Assert.Contains(jobState == "running" ? "held by exact review plan" : "Destination path collision", built.LibraryBuildError);
+        }
+        var kept = await db.Songs.AsNoTracking().SingleAsync(s => s.Id == loser.Id);
+        Assert.True(kept.IsDuplicate); Assert.Equal(plan.Id, kept.ReviewPlanId); Assert.True(kept.IsManuallyApproved);
     }
 
     [Fact]

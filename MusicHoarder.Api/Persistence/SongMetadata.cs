@@ -983,11 +983,27 @@ public class SongMetadata
 
     // --- Duplicate detection lifecycle ---
 
+    /// <summary>Automatic duplicate flag (detection, builder). Never overrides an exact review plan or an
+    /// automation hold; an owner's explicit resolve uses <see cref="MarkAsDuplicateAfterSettledReview"/>.</summary>
     public void MarkAsDuplicate(int duplicateOfId)
     {
         if (ReviewPlanId.HasValue || AutomationHeld) return;
         IsDuplicate = true;
         DuplicateOfId = duplicateOfId;
+    }
+
+    /// <summary>
+    /// Owner-confirmed duplicate decision for a row whose exact review plan is applied and whose copy job
+    /// has stopped (the caller proves both). Only album membership changes: the plan receipt, the manual
+    /// approval and the built copy stay as they are. An automation hold still wins: lifting it is the
+    /// explicit resume-automation decision, never a side effect of resolving duplicates.
+    /// </summary>
+    public bool MarkAsDuplicateAfterSettledReview(int duplicateOfId)
+    {
+        if (AutomationHeld) return false;
+        IsDuplicate = true;
+        DuplicateOfId = duplicateOfId;
+        return true;
     }
 
     public void ClearDuplicate()

@@ -150,6 +150,38 @@ duplicate still records the planned path as its current or previous destination,
 stage C would refuse the copy (`destination_held_by_another_track`); the preview
 reports `destinationHeldByDuplicate` and stays blocked instead.
 
+### Owner duplicate decision after a settled review
+
+Automatic duplicate flagging (detection, the legacy builder) never changes a row
+bound to a review plan or held by automation. An explicit owner resolve
+(`POST /api/library/duplicates/resolve`) may mark such a loser once its plan has
+finished with it: the plan is applied and every copy job queued for it has
+stopped (`completed`, `needsAttention` or `rolledBack`). Only membership changes:
+`reviewPlanId`, the manual approval, the reviewed tags and the published copy
+stay. The decision is a later correction, so that job's rollback is then refused
+(`later_correction`).
+
+The resolve is all or nothing and holds the publication gate while it checks
+job states (`writer_busy` when another writer has it). Any loser that cannot be
+marked returns 409 `duplicates_not_marked` with one `{songId, reason}` per
+blocked track and nothing is written, keeper pin included:
+`review_plan_not_applied`, `review_copy_job_missing`,
+`review_copy_job_unfinished`, `automation_held` (a loser) or
+`keeper_automation_held` (a held keeper still flagged duplicate). A resolve
+never lifts an automation hold; that stays the explicit
+`retries/resume-automation` decision with its own evidence. Replaying an
+identical decision returns 200. Success lists `markedIds`.
+
+Such a duplicate no longer claims its built path or album slot against the
+legacy builder, so its keeper is not failed as "held by exact review plan" nor
+flagged a duplicate of the copy it replaces. A held row, a row whose plan is not
+settled, and a plain duplicate's slot behave as before. The physical guard is
+unchanged: the loser's copy job still reserves the path it published, so the
+keeper's build fails as a destination collision and the loser's file is never
+overwritten. Freeing that path is a separate step: a reservation release needs
+the file gone and today also refuses (`destination_in_use`) while the duplicate
+row still records the path as its `destinationPath`.
+
 Rollback persists rollingBack intent, restores verified backup bytes while
 retaining the replacement, then restores metadata and marks plan audit reverted
 in one retryable transaction. The hosted worker resumes interrupted rollbacks.

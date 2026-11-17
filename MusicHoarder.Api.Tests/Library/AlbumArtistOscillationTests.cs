@@ -22,6 +22,7 @@ namespace MusicHoarder.Api.Tests.Library;
 /// elects the other spelling. On prod that ran forever — "Marvin Gaye" ⇄ "Marvin Gaye &amp; Tammi
 /// Terrell", every flip a full re-tag + relocate, pushed to the sync receiver as another copy.
 /// </summary>
+[Collection(MusicHoarder.Api.Tests.Endpoints.ReviewPublicationGateCollection.Name)]
 public class AlbumArtistOscillationTests
 {
     [Fact]

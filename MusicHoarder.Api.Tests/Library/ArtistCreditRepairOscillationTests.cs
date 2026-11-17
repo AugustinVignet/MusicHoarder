@@ -19,6 +19,7 @@ namespace MusicHoarder.Api.Tests.Library;
 /// election, would show up as writes that never reach zero (see <see cref="AlbumArtistOscillationTests"/>
 /// for the ping-pong that class of bug produced on prod).
 /// </summary>
+[Collection(MusicHoarder.Api.Tests.Endpoints.ReviewPublicationGateCollection.Name)]
 public class ArtistCreditRepairOscillationTests
 {
     [Fact]

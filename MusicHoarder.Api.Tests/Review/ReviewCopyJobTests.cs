@@ -447,6 +447,63 @@ public sealed class ReviewCopyJobTests : IDisposable
     }
 
     [PostgresFact]
+    public async Task OwnerResolve_MarksALoserOnlyOnceItsAppliedPlansCopyStopped_KeepingPlanApprovalAndCopy()
+    {
+        await using var store = await Store.CreateAsync();
+        var loser = await AddSong(store.Db, number: 1);
+        var keeper = await AddSong(store.Db, number: 2);
+        var plan = await Plan(store.Db, [loser], new { Genre = "Reviewed" });
+        await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, plan.Id, plan.Revision, default);
+        var request = new MusicHoarder.Api.Endpoints.DuplicateResolveRequest(keeper.Id, [loser.Id]);
+
+        // Copy job still pending: refused, explicitly, and nothing is written.
+        await using (var db = NewDb(store))
+        {
+            var pending = await MusicHoarder.Api.Endpoints.DuplicatesEndpoints.Resolve(request, db, default);
+            Assert.Equal(409, Assert.IsAssignableFrom<Microsoft.AspNetCore.Http.IStatusCodeHttpResult>(pending).StatusCode);
+            Assert.Equal("duplicates_not_marked", Property(pending, "code"));
+            var block = Assert.Single((IEnumerable<MusicHoarder.Api.Endpoints.DuplicateResolveBlock>)Property(pending, "Blocked")!);
+            Assert.Equal(new MusicHoarder.Api.Endpoints.DuplicateResolveBlock(loser.Id, "review_copy_job_unfinished"), block);
+        }
+        Assert.Null((await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == keeper.Id)).DuplicateKeeperPinnedAtUtc);
+
+        // A writer holding the publication gate makes the resolve busy, not silently partial.
+        await using (var competing = NewDb(store))
+        await using (var gate = await ReviewWriteGuard.AcquireAsync(competing, false, default))
+        await using (var db = NewDb(store))
+        {
+            Assert.NotNull(gate);
+            Assert.Equal("writer_busy", Property(await MusicHoarder.Api.Endpoints.DuplicatesEndpoints.Resolve(request, db, default), "code"));
+        }
+
+        Assert.True(await Processor(store.Db).RunNextAsync(default));
+        var job = await store.Db.ReviewCopyJobs.AsNoTracking().SingleAsync();
+        Assert.Equal("completed", job.State);
+        await using (var db = NewDb(store))
+        {
+            var done = await MusicHoarder.Api.Endpoints.DuplicatesEndpoints.Resolve(request, db, default);
+            Assert.Equal(200, Assert.IsAssignableFrom<Microsoft.AspNetCore.Http.IStatusCodeHttpResult>(done).StatusCode);
+            Assert.Equal(new[] { loser.Id }, (int[])Property(done, "MarkedIds")!);
+        }
+        var marked = await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == loser.Id);
+        Assert.True(marked.IsDuplicate); Assert.Equal(keeper.Id, marked.DuplicateOfId);
+        Assert.Equal(plan.Id, marked.ReviewPlanId); Assert.True(marked.IsManuallyApproved);
+        Assert.Equal("Reviewed", marked.Genre);
+        Assert.True(File.Exists(marked.DestinationPath)); // Non-destructive: the published copy stays.
+
+        // The duplicate decision is a later correction: the old job can no longer restore the row.
+        Assert.Equal("later_correction", (await Assert.ThrowsAsync<ReviewPlanException>(() =>
+            ReviewCopyRollback.RunAsync(store.Db, files, Owner, job.Id, default))).Error.Code);
+        Assert.True((await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == loser.Id)).IsDuplicate);
+    }
+
+    private static object? Property(Microsoft.AspNetCore.Http.IResult result, string name)
+    {
+        var value = Assert.IsAssignableFrom<Microsoft.AspNetCore.Http.IValueHttpResult>(result).Value!;
+        return value.GetType().GetProperty(name)!.GetValue(value);
+    }
+
+    [PostgresFact]
     public async Task SourceContentChangedBeforeApply_EvenWithSameStat_RequiresNewPreview()
     {
         await using var store = await Store.CreateAsync(); var song = await AddSong(store.Db);
