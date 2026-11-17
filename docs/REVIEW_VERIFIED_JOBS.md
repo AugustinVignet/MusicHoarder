@@ -178,9 +178,8 @@ flagged a duplicate of the copy it replaces. A held row, a row whose plan is not
 settled, and a plain duplicate's slot behave as before. The physical guard is
 unchanged: the loser's copy job still reserves the path it published, so the
 keeper's build fails as a destination collision and the loser's file is never
-overwritten. Freeing that path is a separate step: a reservation release needs
-the file gone and today also refuses (`destination_in_use`) while the duplicate
-row still records the path as its `destinationPath`.
+overwritten. Freeing that path is an explicit release after the file has been
+set aside (see below).
 
 Rollback persists rollingBack intent, restores verified backup bytes while
 retaining the replacement, then restores metadata and marks plan audit reverted
@@ -291,3 +290,17 @@ recorded references; any other job still blocks. Rolling back a released job is
 refused with `destination_reservation_released` before anything is touched. Reusing
 the request UUID returns the same receipt; another path under it is `request_key_reused`.
 `GET /api/review/destination-reservations/releases` lists receipts, newest first.
+
+A row that records the path as its `destinationPath` normally keeps it in use. One
+exception: a duplicate the owner resolved after its review settled (same conditions
+as the resolve: marked, not held, plan applied, every copy job stopped). Once its
+published file has been set aside — the file check above still refuses while it is
+there — the release clears that stale pointer and lists the row in
+`clearedDuplicateSongIds`. Its plan, approval and duplicate link stay. When
+`forSongId` names a keeper whose automatic build failed (no review plan, not held,
+not a duplicate), the same release puts that build back in the queue (attempts
+reset, enrichment and paths untouched) and returns it as `requeuedBuildSongId`.
+Both changes are audited in the song change log (source `destination-release`,
+the release reason, evidence `destination-release:<receipt id>`); the per-change
+revert endpoint refuses them. The receipt is reconstructed from that audit on a
+replay or listing, so the schema is unchanged.

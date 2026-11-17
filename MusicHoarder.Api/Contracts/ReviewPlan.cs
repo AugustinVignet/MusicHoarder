@@ -33,5 +33,9 @@ public sealed record ReviewPlanFileFingerprint(string Path, string Presence, str
 /// <summary>ForSongId names the track to republish at this path: its own row (whose file is gone) does not
 /// count as an active occupant, so stale reservations of other tracks can be released for it.</summary>
 public sealed record ReviewDestinationReleaseRequest(Guid RequestId, string DestinationPath, string Reason, int? ForSongId = null);
+/// <summary>ClearedDuplicateSongIds: owner-resolved duplicates of a settled review whose file was set aside;
+/// their stale destination pointer was cleared (audited). RequeuedBuildSongId: the ForSongId keeper whose failed
+/// automatic build was put back in the queue.</summary>
 public sealed record ReviewDestinationReleaseResult(Guid Id, Guid RequestId, string DestinationPath, string Reason,
-    DateTime CreatedAtUtc, IReadOnlyList<Guid> ReleasedJobIds, IReadOnlyList<int> ClearedPreviousSongIds);
+    DateTime CreatedAtUtc, IReadOnlyList<Guid> ReleasedJobIds, IReadOnlyList<int> ClearedPreviousSongIds,
+    IReadOnlyList<int>? ClearedDuplicateSongIds = null, int? RequeuedBuildSongId = null);

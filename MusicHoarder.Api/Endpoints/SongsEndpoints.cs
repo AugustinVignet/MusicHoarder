@@ -1003,6 +1003,8 @@ public static class SongsEndpoints
 
         if (change.AppliedAtUtc is null || change.RevertedAtUtc is not null)
             return Results.UnprocessableEntity(new { message = "Only an applied, not-yet-reverted change can be reverted." });
+        if (change.Source == MusicHoarder.Api.Review.Copy.ReviewDestinationReleases.AuditSource)
+            return Results.UnprocessableEntity(new { message = "A destination release is a library operation, not a tag change; it cannot be reverted here." });
 
         SongFieldReverter.Apply(song, change.FieldName, change.OldValue);
         // A metadata undo must reach the built copy as well as the row. Keep in-flight and

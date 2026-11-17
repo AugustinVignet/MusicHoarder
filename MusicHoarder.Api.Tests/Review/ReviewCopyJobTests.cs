@@ -497,6 +497,69 @@ public sealed class ReviewCopyJobTests : IDisposable
         Assert.True((await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == loser.Id)).IsDuplicate);
     }
 
+    [PostgresFact]
+    public async Task ReleaseAfterOwnerResolve_ClearsTheSetAsideDuplicatesPointer_AndRequeuesItsKeeper()
+    {
+        await using var store = await Store.CreateAsync();
+        var loser = await AddSong(store.Db, number: 1);
+        var plan = await Plan(store.Db, [loser], new { Genre = "Reviewed" });
+        await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, plan.Id, plan.Revision, default);
+        Assert.True(await Processor(store.Db).RunNextAsync(default));
+        store.Db.ChangeTracker.Clear();
+        var job = await store.Db.ReviewCopyJobs.AsNoTracking().SingleAsync();
+        var path = (await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == loser.Id)).DestinationPath!;
+        // The keeper: an automatic build that kept failing because the loser held this path.
+        var keeper = await AddSong(store.Db, number: 2);
+        File.Delete(keeper.DestinationPath!);
+        keeper.DestinationPath = null; keeper.PreviousDestinationPath = null;
+        keeper.MarkBuildFailed($"Destination path is held by exact review plan for song {loser.Id}");
+        for (var n = 0; n < 4; n++) keeper.MarkBuildFailed("again");
+        await store.Db.SaveChangesAsync();
+        var release = new ReviewDestinationReleaseRequest(Guid.NewGuid(), path, "Duplicate set aside for its keeper", keeper.Id);
+
+        // Not yet a duplicate: the row is a live occupant.
+        File.Move(path, path + ".aside");
+        Assert.Equal("destination_in_use", (await Assert.ThrowsAsync<ReviewPlanException>(() =>
+            ReviewDestinationReleases.ReleaseAsync(store.Db, files, Owner, release, default))).Error.Code);
+        File.Move(path + ".aside", path);
+        await using (var db = NewDb(store))
+            Assert.Equal(200, Assert.IsAssignableFrom<Microsoft.AspNetCore.Http.IStatusCodeHttpResult>(await MusicHoarder.Api.Endpoints
+                .DuplicatesEndpoints.Resolve(new(keeper.Id, [loser.Id]), db, default)).StatusCode);
+
+        // Marked, but its published file is still at the path: nothing is released, the file is never touched.
+        Assert.Equal("destination_file_present", (await Assert.ThrowsAsync<ReviewPlanException>(() =>
+            ReviewDestinationReleases.ReleaseAsync(store.Db, files, Owner, release, default))).Error.Code);
+        // An automation hold keeps the place even with the file gone.
+        var aside = Path.Combine(root, "_mis-de-cote", Path.GetFileName(path));
+        Directory.CreateDirectory(Path.GetDirectoryName(aside)!); File.Move(path, aside);
+        await store.Db.Songs.Where(s => s.Id == loser.Id).ExecuteUpdateAsync(u => u.SetProperty(s => s.AutomationHeld, true));
+        Assert.Equal("destination_in_use", (await Assert.ThrowsAsync<ReviewPlanException>(() =>
+            ReviewDestinationReleases.ReleaseAsync(store.Db, files, Owner, release, default))).Error.Code);
+        await store.Db.Songs.Where(s => s.Id == loser.Id).ExecuteUpdateAsync(u => u.SetProperty(s => s.AutomationHeld, false));
+        store.Db.ChangeTracker.Clear();
+
+        var receipt = await ReviewDestinationReleases.ReleaseAsync(store.Db, files, Owner, release, default);
+        Assert.Equal(new[] { job.Id }, receipt.ReleasedJobIds);
+        Assert.Equal(new[] { loser.Id }, receipt.ClearedDuplicateSongIds);
+        Assert.Equal(keeper.Id, receipt.RequeuedBuildSongId);
+        Assert.Equal(JsonSerializer.Serialize(receipt), JsonSerializer.Serialize(
+            await ReviewDestinationReleases.ReleaseAsync(store.Db, files, Owner, release, default)));
+        store.Db.ChangeTracker.Clear();
+        var cleared = await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == loser.Id);
+        Assert.Null(cleared.DestinationPath);
+        Assert.True(cleared.IsDuplicate); Assert.Equal(plan.Id, cleared.ReviewPlanId); Assert.True(cleared.IsManuallyApproved);
+        var requeued = await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == keeper.Id);
+        Assert.Equal(LibraryBuildStatus.Pending, requeued.LibraryBuildStatus);
+        Assert.Equal(0, requeued.LibraryBuildAttempts); Assert.Null(requeued.LibraryBuildError);
+        var audits = await store.Db.SongMetadataChanges.AsNoTracking().Where(c => c.Source == "destination-release").OrderBy(c => c.SongId).ToListAsync();
+        Assert.Equal(2, audits.Count);
+        Assert.Equal(("DestinationPath", path, (string?)null), (audits[0].FieldName, audits[0].OldValue, audits[0].NewValue));
+        Assert.Equal(("LibraryBuildStatus", "Failed", "Pending"), (audits[1].FieldName, audits[1].OldValue, audits[1].NewValue));
+        Assert.All(audits, a => Assert.Equal("Duplicate set aside for its keeper", a.Reason));
+        Assert.True(File.Exists(aside)); // Set aside, never deleted.
+        Assert.Equal(receipt.ClearedDuplicateSongIds, Assert.Single(await ReviewDestinationReleases.ListAsync(store.Db, Owner, default)).ClearedDuplicateSongIds);
+    }
+
     private static object? Property(Microsoft.AspNetCore.Http.IResult result, string name)
     {
         var value = Assert.IsAssignableFrom<Microsoft.AspNetCore.Http.IValueHttpResult>(result).Value!;

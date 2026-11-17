@@ -1049,6 +1049,17 @@ public class SongMetadata
         LibraryBuildAttempts++;
     }
 
+    /// <summary>Gives a failed automatic build a fresh run without touching enrichment, tags or paths
+    /// (unlike <see cref="ResetLibraryBuild"/>): used once the obstacle it failed on was explicitly removed.</summary>
+    public void RequeueFailedBuild()
+    {
+        if (LibraryBuildStatus != LibraryBuildStatus.Failed) return;
+        LibraryBuildStatus = LibraryBuildStatus.Pending;
+        LibraryBuildLastAttemptedAtUtc = null;
+        LibraryBuildAttempts = 0;
+        LibraryBuildError = null;
+    }
+
     public void ResetLibraryBuild()
     {
         LibraryBuildStatus = LibraryBuildStatus.Pending;
