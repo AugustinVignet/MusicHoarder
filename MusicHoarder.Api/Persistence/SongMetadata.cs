@@ -199,7 +199,8 @@ public class SongMetadata
     /// <summary>
     /// When set, the user explicitly chose this song as the keeper of its duplicate group.
     /// Detection re-runs rank a pinned song above any automatic quality election so a manual
-    /// choice is never overturned. Cleared on re-fingerprint (the audio identity changed).
+    /// choice is never overturned: a pinned keeper is never flagged, and a loser flagged against it
+    /// is never cleared or re-attached by detection. Cleared on re-fingerprint (the audio identity changed).
     /// </summary>
     public DateTime? DuplicateKeeperPinnedAtUtc { get; set; }
 

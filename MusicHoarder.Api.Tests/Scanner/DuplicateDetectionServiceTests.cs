@@ -527,6 +527,185 @@ public class DuplicateDetectionServiceTests
     }
 
     [Fact]
+    public async Task DetectDuplicates_OwnerResolve_WithoutFingerprintEvidence_SurvivesEveryRerun()
+    {
+        // The owner resolved two tracks the fingerprints cannot link (different encodes, a cut intro).
+        // Detection used to clear every flag outside a Confirmed cluster, undoing the decision on each
+        // restart and handing the loser back to the builder.
+        await using var db = CreateDbContext();
+        var keeper = CreateSong(1, "/a/track.flac", ".flac", "FP_OK", bitrate: null, size: 50_000_000, title: "Keeper");
+        var loser = CreateSong(2, "/b/track.mp3", ".mp3", "FP_OL", bitrate: 320, size: 10_000_000, title: "Loser");
+        db.Songs.AddRange(keeper, loser);
+        await db.SaveChangesAsync();
+        keeper.DuplicateKeeperPinnedAtUtc = DateTime.UtcNow;
+        loser.MarkAsDuplicate(keeper.Id);
+        await db.SaveChangesAsync();
+
+        var service = CreateService(db);
+        for (var run = 0; run < 2; run++)
+        {
+            var result = await service.DetectDuplicatesAsync();
+            Assert.Equal(0, result.DuplicatesFlagged);
+            Assert.Equal(0, result.DuplicatesCleared);
+            Assert.True(loser.IsDuplicate);
+            Assert.Equal(keeper.Id, loser.DuplicateOfId);
+            Assert.False(keeper.IsDuplicate);
+        }
+    }
+
+    [Fact]
+    public async Task DetectDuplicates_ResolveThenRestart_KeepsTheOwnersDecision_UntilTheOwnerDismissesIt()
+    {
+        await using var db = CreateDbContext();
+        db.Songs.AddRange(
+            CreateSong(1, "/a/track.flac", ".flac", "FP_E2", bitrate: null, size: 50_000_000, title: "A"),
+            CreateSong(2, "/b/track.mp3", ".mp3", "FP_E2", bitrate: 320, size: 10_000_000, title: "A"),
+            CreateSong(3, "/c/other.mp3", ".mp3", "FP_E3", bitrate: 320, size: 10_000_000, title: "C"));
+        await db.SaveChangesAsync();
+        var service = CreateService(db);
+        await service.DetectDuplicatesAsync(); // 2 -> 1 automatically
+
+        // The owner keeps the mp3 and also retires an unrelated rip the fingerprints never linked.
+        var resolved = await MusicHoarder.Api.Endpoints.DuplicatesEndpoints.Resolve(
+            new MusicHoarder.Api.Endpoints.DuplicateResolveRequest(KeeperId: 2, LoserIds: [1, 3]), db, CancellationToken.None);
+        Assert.Equal(200, Assert.IsAssignableFrom<Microsoft.AspNetCore.Http.IStatusCodeHttpResult>(resolved).StatusCode);
+        string State() => string.Join(";", db.Songs.AsNoTracking().OrderBy(s => s.Id).AsEnumerable()
+            .Select(s => $"{s.Id}:{s.IsDuplicate}:{s.DuplicateOfId}"));
+        var decided = State();
+        Assert.Equal("1:True:2;2:False:;3:True:2", decided);
+
+        // "Restart": detection runs again, twice, and changes nothing.
+        for (var run = 0; run < 2; run++)
+        {
+            var result = await service.DetectDuplicatesAsync();
+            Assert.Equal(0, result.DuplicatesFlagged);
+            Assert.Equal(0, result.DuplicatesCleared);
+            Assert.Equal(decided, State());
+        }
+
+        // Undoing the decision stays the owner's explicit dismiss, which detection then respects too.
+        await MusicHoarder.Api.Endpoints.DuplicatesEndpoints.Dismiss(
+            new MusicHoarder.Api.Endpoints.DuplicateDismissRequest([2, 3]), db, new NoUser(), CancellationToken.None);
+        await service.DetectDuplicatesAsync();
+        Assert.Equal("1:True:2;2:False:;3:False:", State());
+    }
+
+    [Fact]
+    public async Task DetectDuplicates_OwnerResolvedLoser_IsNotReattachedToAnotherCluster()
+    {
+        // The loser shares exact audio with a better copy the owner did not choose; the owner's keeper
+        // has no fingerprint link to it. Detection must not move the loser to its own elected keeper.
+        await using var db = CreateDbContext();
+        var keeper = CreateSong(1, "/a/keeper.mp3", ".mp3", "FP_RK", bitrate: 256, size: 8_000_000, title: "Keeper");
+        var loser = CreateSong(2, "/b/loser.mp3", ".mp3", "FP_RX", bitrate: 128, size: 4_000_000, title: "Loser");
+        var twin = CreateSong(3, "/c/twin.flac", ".flac", "FP_RX", bitrate: null, size: 40_000_000, title: "Twin");
+        db.Songs.AddRange(keeper, loser, twin);
+        await db.SaveChangesAsync();
+        keeper.DuplicateKeeperPinnedAtUtc = DateTime.UtcNow;
+        loser.MarkAsDuplicate(keeper.Id);
+        await db.SaveChangesAsync();
+
+        var result = await CreateService(db).DetectDuplicatesAsync();
+
+        Assert.Equal(0, result.DuplicatesFlagged);
+        Assert.Equal(0, result.DuplicatesCleared);
+        Assert.Equal(keeper.Id, loser.DuplicateOfId);
+        Assert.True(loser.IsDuplicate);
+        Assert.False(twin.IsDuplicate);
+        // The evidence is still recorded for inspection.
+        Assert.Single(await db.SongDuplicateLinks.ToListAsync());
+    }
+
+    [Fact]
+    public async Task DetectDuplicates_OwnerResolvedLoserWithSettledReviewPlan_SurvivesItsOwnCluster()
+    {
+        // An owner resolve may mark a loser bound to a settled review plan. Detection skips such rows when
+        // flagging, so they never joined the current set and were cleared on the next pass.
+        await using var db = CreateDbContext();
+        var keeper = CreateSong(1, "/a/track.flac", ".flac", "FP_RP", bitrate: null, size: 50_000_000);
+        var loser = CreateSong(2, "/b/track.mp3", ".mp3", "FP_RP", bitrate: 320, size: 10_000_000);
+        db.Songs.AddRange(keeper, loser);
+        await db.SaveChangesAsync();
+        loser.ReviewPlanId = Guid.NewGuid();
+        keeper.DuplicateKeeperPinnedAtUtc = DateTime.UtcNow;
+        Assert.True(loser.MarkAsDuplicateAfterSettledReview(keeper.Id));
+        await db.SaveChangesAsync();
+
+        var result = await CreateService(db).DetectDuplicatesAsync();
+
+        Assert.Equal(0, result.DuplicatesCleared);
+        Assert.True(loser.IsDuplicate);
+        Assert.Equal(keeper.Id, loser.DuplicateOfId);
+    }
+
+    [Fact]
+    public async Task DetectDuplicates_PinnedKeeper_IsNeverFlagged_EvenUnderANewerPin()
+    {
+        await using var db = CreateDbContext();
+        var older = CreateSong(1, "/a/track.flac", ".flac", "FP_PP", bitrate: null, size: 50_000_000);
+        var newer = CreateSong(2, "/b/track.mp3", ".mp3", "FP_PP", bitrate: 320, size: 10_000_000);
+        older.DuplicateKeeperPinnedAtUtc = DateTime.UtcNow.AddDays(-1);
+        newer.DuplicateKeeperPinnedAtUtc = DateTime.UtcNow;
+        db.Songs.AddRange(older, newer);
+        await db.SaveChangesAsync();
+
+        var result = await CreateService(db).DetectDuplicatesAsync();
+
+        Assert.Equal(0, result.DuplicatesFlagged);
+        Assert.False(older.IsDuplicate);
+        Assert.False(newer.IsDuplicate);
+    }
+
+    [Fact]
+    public async Task DetectDuplicates_DismissedPair_IsNotFlaggedThroughABridgingThirdSong()
+    {
+        // 1 and 2 were dismissed as "not duplicates"; 3 matches both, so union-find puts all three in one
+        // cluster. 3 may still be flagged, but 2 must never be flagged against 1.
+        await using var db = CreateDbContext();
+        var best = CreateSong(1, "/a/track.flac", ".flac", "FP_BR", bitrate: null, size: 50_000_000);
+        var dismissed = CreateSong(2, "/b/track.mp3", ".mp3", "FP_BR", bitrate: 320, size: 10_000_000);
+        var bridge = CreateSong(3, "/c/track.mp3", ".mp3", "FP_BR", bitrate: 128, size: 4_000_000);
+        db.Songs.AddRange(best, dismissed, bridge);
+        await db.SaveChangesAsync();
+        db.SongDuplicateLinks.Add(new SongDuplicateLink
+        {
+            OwnerUserId = best.OwnerUserId,
+            SongIdLow = best.Id,
+            SongIdHigh = dismissed.Id,
+            Status = DuplicateLinkStatus.Dismissed,
+            Confidence = DuplicateConfidence.Confirmed,
+            DetectedAtUtc = DateTime.UtcNow,
+            DismissedAtUtc = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        await CreateService(db).DetectDuplicatesAsync();
+
+        Assert.False(best.IsDuplicate);
+        Assert.False(dismissed.IsDuplicate);
+        Assert.True(bridge.IsDuplicate);
+        Assert.Equal(best.Id, bridge.DuplicateOfId);
+    }
+
+    [Fact]
+    public async Task DetectDuplicates_AutomaticFlagAgainstAnUnpinnedKeeper_IsStillClearedWhenEvidenceIsGone()
+    {
+        // Only owner decisions are durable: an automatic flag without evidence is still cleared.
+        await using var db = CreateDbContext();
+        var keeper = CreateSong(1, "/a/track.flac", ".flac", "FP_AK", bitrate: null, size: 50_000_000, title: "Keeper");
+        var stale = CreateSong(2, "/b/track.mp3", ".mp3", "FP_AS", bitrate: 320, size: 10_000_000, title: "Stale");
+        db.Songs.AddRange(keeper, stale);
+        await db.SaveChangesAsync();
+        stale.MarkAsDuplicate(keeper.Id);
+        await db.SaveChangesAsync();
+
+        var result = await CreateService(db).DetectDuplicatesAsync();
+
+        Assert.Equal(1, result.DuplicatesCleared);
+        Assert.False(stale.IsDuplicate);
+    }
+
+    [Fact]
     public async Task DetectDuplicates_SharedAcoustId_PairsDespiteDifferentMetadata()
     {
         // A mistagged copy (different title/artist) still pairs via the shared AcoustID track id and
@@ -799,6 +978,12 @@ public class DuplicateDetectionServiceTests
         }
 
         public double Similarity(uint[] a, uint[] b) => similarity;
+    }
+
+    private sealed class NoUser : MusicHoarder.Api.Auth.ICurrentUserAccessor
+    {
+        public MusicHoarder.Api.Auth.CurrentUser? User => null;
+        public Guid UserId => Guid.Empty;
     }
 
     private sealed class TestOptionsMonitor(MusicEnricherOptions value) : IOptionsMonitor<MusicEnricherOptions>

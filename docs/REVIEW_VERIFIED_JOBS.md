@@ -172,6 +172,22 @@ never lifts an automation hold; that stays the explicit
 `retries/resume-automation` decision with its own evidence. Replaying an
 identical decision returns 200. Success lists `markedIds`.
 
+An owner decision is durable and outranks duplicate detection, which runs after
+every fingerprint pass (so after any restart that finds pending fingerprints):
+
+- a loser the owner resolved (flagged against a live keeper the owner pinned)
+  is never cleared and never re-attached to another keeper, even when the
+  fingerprints cannot link the two tracks or link the loser to a better copy;
+- a pinned keeper is never flagged a duplicate by detection;
+- a dismissed pair is never flagged one against the other, even when a third
+  track bridges them into one cluster.
+
+Detection still flags new candidates where no owner decision exists, and still
+clears an automatic flag whose evidence is gone. The keeper pin is the record of
+the decision (only resolve sets it; a re-fingerprint or pipeline purge clears
+it), so no schema change is needed and decisions taken before this rule are
+covered. Undoing a resolve stays `POST /api/library/duplicates/dismiss`.
+
 Such a duplicate no longer claims its built path or album slot against the
 legacy builder, so its keeper is not failed as "held by exact review plan" nor
 flagged a duplicate of the copy it replaces. A held row, a row whose plan is not

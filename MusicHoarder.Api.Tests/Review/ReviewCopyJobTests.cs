@@ -498,6 +498,90 @@ public sealed class ReviewCopyJobTests : IDisposable
     }
 
     [PostgresFact]
+    public async Task OwnerResolvedDuplicates_SurviveARestartsDetection_WithoutAnyWrite()
+    {
+        // The detection run after a startup fingerprint pass used to clear owner resolves, re-attach
+        // others and let the builder publish the released losers. Resolve, "restart", detect:
+        // not one Songs or SongDuplicateLinks row may be written.
+        await using var store = await Store.CreateAsync();
+        var settled = await AddSong(store.Db, number: 1);   // loser whose review plan is applied and copied
+        var keeper = await AddSong(store.Db, number: 2);    // owner's keeper, no fingerprint link to the losers
+        var plain = await AddSong(store.Db, number: 3);     // plain loser, exact audio twin of `better`
+        var better = await AddSong(store.Db, number: 4);    // higher-ranked twin detection would elect
+        var autoKeeper = await AddSong(store.Db, number: 5); // an ordinary automatic pair, already settled
+        var autoLoser = await AddSong(store.Db, number: 6);
+        var plan = await Plan(store.Db, [settled], new { Genre = "Reviewed" });
+        await ReviewPlanService.ApplyAsync(store.Db, files, Resolver, Owner, plan.Id, plan.Revision, default);
+        Assert.True(await Processor(store.Db).RunNextAsync(default));
+        foreach (var (song, print, size) in new[] { (settled, "FP_SETTLED", 1L), (keeper, "FP_KEEPER", 1L), (plain, "FP_TWIN", 1L),
+            (better, "FP_TWIN", 9L), (autoKeeper, "FP_AUTO", 9L), (autoLoser, "FP_AUTO", 1L) })
+        {
+            var id = song.Id; var title = "Title " + id;
+            await store.Db.Songs.Where(s => s.Id == id).ExecuteUpdateAsync(u => u.SetProperty(s => s.Fingerprint, print)
+                .SetProperty(s => s.FileSizeBytes, size).SetProperty(s => s.Title, title));
+        }
+        store.Db.ChangeTracker.Clear();
+
+        var detection = new MusicHoarder.Api.Scanner.DuplicateDetectionService(new FreshScopes(() => NewDb(store)),
+            new MusicHoarder.Api.Scanner.DuplicateCandidateGenerator(Microsoft.Extensions.Logging.Abstractions.NullLogger<MusicHoarder.Api.Scanner.DuplicateCandidateGenerator>.Instance),
+            new MusicHoarder.Api.Scanner.DuplicatePairConfirmer(new MusicHoarder.Api.Audio.FingerprintSimilarityGate()),
+            new StaticOptions(new MusicEnricherOptions()),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<MusicHoarder.Api.Scanner.DuplicateDetectionService>.Instance);
+        await detection.DetectDuplicatesAsync(); // before the decision: plain -> better, autoLoser -> autoKeeper
+        Assert.Equal(better.Id, (await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == plain.Id)).DuplicateOfId);
+
+        await using (var db = NewDb(store))
+        {
+            var done = await MusicHoarder.Api.Endpoints.DuplicatesEndpoints.Resolve(new(keeper.Id, [settled.Id, plain.Id]), db, default);
+            Assert.Equal(200, Assert.IsAssignableFrom<Microsoft.AspNetCore.Http.IStatusCodeHttpResult>(done).StatusCode);
+        }
+        async Task<string> Rows()
+        {
+            await using var db = NewDb(store);
+            return string.Join("|", await db.Database.SqlQueryRaw<string>("""
+                SELECT coalesce((SELECT string_agg(s.xmin::text || to_jsonb(s)::text, ',' ORDER BY s."Id") FROM "Songs" s), '')
+                    || '#' || coalesce((SELECT string_agg(l.xmin::text || to_jsonb(l)::text, ',' ORDER BY l."Id") FROM "SongDuplicateLinks" l), '')
+                    AS "Value"
+                """).ToListAsync());
+        }
+        var decided = await Rows();
+        var states = await store.Db.Songs.AsNoTracking().OrderBy(s => s.Id).Select(s => new { s.Id, s.IsDuplicate, s.DuplicateOfId }).ToListAsync();
+        Assert.Contains(states, s => s.Id == settled.Id && s.IsDuplicate && s.DuplicateOfId == keeper.Id);
+        Assert.Contains(states, s => s.Id == plain.Id && s.IsDuplicate && s.DuplicateOfId == keeper.Id);
+        Assert.Contains(states, s => s.Id == autoLoser.Id && s.IsDuplicate && s.DuplicateOfId == autoKeeper.Id);
+
+        // Restart: a brand-new service and contexts, two passes. No row version moves, no link changes.
+        for (var run = 0; run < 2; run++)
+        {
+            var result = await detection.DetectDuplicatesAsync();
+            Assert.Equal(0, result.DuplicatesFlagged);
+            Assert.Equal(0, result.DuplicatesCleared);
+            Assert.Equal(decided, await Rows());
+        }
+        var kept = await store.Db.Songs.AsNoTracking().SingleAsync(s => s.Id == settled.Id);
+        Assert.Equal(plan.Id, kept.ReviewPlanId);
+        Assert.True(File.Exists(kept.DestinationPath));
+    }
+
+    private sealed class FreshScopes(Func<MusicHoarderDbContext> create) : Microsoft.Extensions.DependencyInjection.IServiceScopeFactory
+    {
+        public Microsoft.Extensions.DependencyInjection.IServiceScope CreateScope() => new Scope(create());
+        private sealed class Scope(MusicHoarderDbContext db) : Microsoft.Extensions.DependencyInjection.IServiceScope, IServiceProvider
+        {
+            public IServiceProvider ServiceProvider => this;
+            public object? GetService(Type serviceType) => serviceType == typeof(MusicHoarderDbContext) ? db : null;
+            public void Dispose() => db.Dispose();
+        }
+    }
+
+    private sealed class StaticOptions(MusicEnricherOptions value) : Microsoft.Extensions.Options.IOptionsMonitor<MusicEnricherOptions>
+    {
+        public MusicEnricherOptions CurrentValue => value;
+        public MusicEnricherOptions Get(string? name) => value;
+        public IDisposable? OnChange(Action<MusicEnricherOptions, string?> listener) => null;
+    }
+
+    [PostgresFact]
     public async Task ReleaseAfterOwnerResolve_ClearsTheSetAsideDuplicatesPointer_AndRequeuesItsKeeper()
     {
         await using var store = await Store.CreateAsync();

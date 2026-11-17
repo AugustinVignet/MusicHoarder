@@ -170,15 +170,26 @@ public class DuplicateDetectionService(
         }
 
         // --- Project Confirmed clusters onto IsDuplicate via union-find + keeper election ---
+        var dismissedPairs = existingLinks
+            .Where(l => l.Status == DuplicateLinkStatus.Dismissed)
+            .Select(l => SongIdPair.Of(l))
+            .ToHashSet();
         var unionFind = new UnionFind();
         foreach (var (pair, verdict) in verdicts)
         {
             if (verdict.Confidence != DuplicateConfidence.Confirmed)
                 continue;
-            if (existingByPair.TryGetValue(pair, out var link) && link.Status == DuplicateLinkStatus.Dismissed)
+            if (dismissedPairs.Contains(pair))
                 continue;
             unionFind.Union(pair.Low, pair.High);
         }
+
+        // Owner decisions are durable and outrank detection: a loser the owner resolved stays attached
+        // to the keeper they chose, whatever this pass finds; a pinned keeper is never flagged.
+        var ownerResolved = ownerSongs
+            .Where(s => IsOwnerResolvedDuplicate(s, byId))
+            .Select(s => s.Id)
+            .ToHashSet();
 
         var clusters = unionFind.Clusters()
             .Select(ids => ids.Select(id => byId[id]).ToList())
@@ -191,7 +202,12 @@ public class DuplicateDetectionService(
 
         foreach (var cluster in clusters)
         {
-            var ranked = IDuplicateDetectionService.RankKeeperFirst(cluster);
+            // Owner-resolved losers keep their decision and take no part in the election.
+            var electable = cluster.Where(s => !ownerResolved.Contains(s.Id)).ToList();
+            if (electable.Count == 0)
+                continue;
+
+            var ranked = IDuplicateDetectionService.RankKeeperFirst(electable);
             var best = ranked[0];
 
             if (best.IsDuplicate)
@@ -206,6 +222,11 @@ public class DuplicateDetectionService(
                 // A reviewed album slot is independent of recording-level duplicate evidence.
                 // Keep the edge for inspection without retiring that explicit membership.
                 if (dup.ReviewPlanId.HasValue) continue;
+                // A keeper the owner pinned is never retired by detection, even under another pin.
+                if (dup.DuplicateKeeperPinnedAtUtc.HasValue) continue;
+                // The owner said "not duplicates" for this exact pair; a third song bridging the two
+                // into one cluster must not flag one against the other.
+                if (dismissedPairs.Contains(SongIdPair.Of(dup.Id, best.Id))) continue;
                 currentDuplicateIds.Add(dup.Id);
 
                 if (!dup.IsDuplicate || dup.DuplicateOfId != best.Id)
@@ -216,7 +237,7 @@ public class DuplicateDetectionService(
             }
         }
 
-        foreach (var song in ownerSongs.Where(s => s.IsDuplicate && !currentDuplicateIds.Contains(s.Id)))
+        foreach (var song in ownerSongs.Where(s => s.IsDuplicate && !currentDuplicateIds.Contains(s.Id) && !ownerResolved.Contains(s.Id)))
         {
             song.ClearDuplicate();
             cleared++;
@@ -225,6 +246,19 @@ public class DuplicateDetectionService(
         var suspected = verdicts.Count(v => v.Value.Confidence == DuplicateConfidence.Suspected);
         return new OwnerOutcome(clusters.Count, flagged, cleared, suspected);
     }
+
+    /// <summary>
+    /// A duplicate flag the owner set with <c>POST /api/library/duplicates/resolve</c>: it points at a
+    /// live keeper the owner pinned. Only that endpoint pins a keeper (a re-fingerprint or pipeline
+    /// purge clears the pin), so the pin is the durable record of the decision. Detection never clears
+    /// or re-attaches such a flag; <c>POST /api/library/duplicates/dismiss</c> is the way to undo it.
+    /// </summary>
+    internal static bool IsOwnerResolvedDuplicate(SongMetadata song, IReadOnlyDictionary<int, SongMetadata> liveById) =>
+        song.IsDuplicate
+        && song.DuplicateOfId is int keeperId
+        && keeperId != song.Id
+        && liveById.TryGetValue(keeperId, out var keeper)
+        && keeper.DuplicateKeeperPinnedAtUtc.HasValue;
 
     private sealed class UnionFind
     {
